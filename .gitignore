@@ -50,7 +50,6 @@ dist/
 # Machine Learning artifacts
 # ----------------------------
 # Datasets (local copies)
-data/
 datasets/
 MU-Glioma-Post/
 
