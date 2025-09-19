@@ -37,6 +37,7 @@ dist/
 *.out
 *.err
 *.DS_Store
+dqn_test_episode.gif
 
 # ----------------------------
 # VS Code / IDE

@@ -13,6 +13,8 @@ matplotlib==3.10.6
 
 # Utilities:
 tqdm
+gymnasium
+imageio
 
 # Jupyter Notebook
 ipykernel==6.30.1
