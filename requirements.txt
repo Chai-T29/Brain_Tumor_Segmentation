@@ -1,7 +1,7 @@
 # Numerical and data processing libraries:
 numpy==2.3.3
 pandas==2.3.2
-nibabel
+nibabel==5.3.2
 
 # Deep learning libraries:
 torch==2.8.0

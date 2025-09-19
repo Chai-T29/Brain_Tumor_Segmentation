@@ -1,5 +1,5 @@
 import pytorch_lightning as pl
-from model import UNet
+from model.network import UNet
 from data.data_module import BrainTumorDataModule
 
 def main():
