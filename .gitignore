@@ -1,0 +1,77 @@
+# ----------------------------
+# Python
+# ----------------------------
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+*.pyd
+.Python
+.env
+.venv/
+venv/
+ENV/
+env/
+pip-wheel-metadata/
+*.whl
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# ----------------------------
+# Build / packaging
+# ----------------------------
+build/
+develop-eggs/
+dist/
+.eggs/
+.installed.cfg
+*.manifest
+*.spec
+
+# ----------------------------
+# Logs & debug
+# ----------------------------
+*.log
+*.out
+*.err
+*.DS_Store
+
+# ----------------------------
+# VS Code / IDE
+# ----------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ----------------------------
+# Machine Learning artifacts
+# ----------------------------
+# Datasets (local copies)
+data/
+datasets/
+MU-Glioma-Post/
+
+# Model checkpoints / weights
+checkpoints/
+models/
+*.pth
+*.ckpt
+*.pt
+*.h5
+
+# Training outputs
+runs/
+logs/
+wandb/
+mlruns/
+lightning_logs/
+outputs/
+
+# ----------------------------
+# Other OS / editor junk
+# ----------------------------
+.DS_Store
+Thumbs.db

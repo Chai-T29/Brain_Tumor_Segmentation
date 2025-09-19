@@ -1,0 +1,17 @@
+# Numerical and data processing libraries:
+numpy==2.3.3
+pandas==2.3.2
+
+# Deep learning libraries:
+torch==2.8.0
+torchvision==0.23.0
+pytorch-lightning==2.5.5
+
+# Plotting:
+matplotlib==3.10.6
+
+# Utilities:
+tqdm
+
+# Jupyter Notebook
+ipykernel==6.30.1
