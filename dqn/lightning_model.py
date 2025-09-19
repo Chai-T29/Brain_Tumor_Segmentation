@@ -33,7 +33,15 @@ class DQNLightning(pl.LightningModule):
         self.val_env = None
         self.train_state = None
         self.val_state = None
-        self.agent = None
+
+        # Create networks here so they are part of the LightningModule's state_dict
+        self.policy_net = QNetwork(num_actions=9) # num_actions will be updated in setup
+        self.target_net = QNetwork(num_actions=9) # num_actions will be updated in setup
+        self.target_net.load_state_dict(self.policy_net.state_dict())
+        self.target_net.eval()
+
+        self.agent = None # Agent will be created in setup
+
 
     def setup(self, stage=None):
         full_dataset = BrainTumorDataset(data_dir=self.hparams.data_dir)
@@ -47,8 +55,9 @@ class DQNLightning(pl.LightningModule):
         self.train_state = self.train_env.reset()
         self.val_state = self.val_env.reset()
         
-        self.policy_net = QNetwork(num_actions=self.train_env.action_space.n)
-        self.target_net = QNetwork(num_actions=self.train_env.action_space.n)
+        # Update num_actions for the networks based on the environment
+        self.policy_net.fc2 = torch.nn.Linear(self.policy_net.fc2.in_features, self.train_env.action_space.n)
+        self.target_net.fc2 = torch.nn.Linear(self.target_net.fc2.in_features, self.train_env.action_space.n)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
 

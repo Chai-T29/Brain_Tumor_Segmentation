@@ -15,7 +15,7 @@ def main():
     MEMORY_SIZE = 10000
     TARGET_UPDATE = 10
     MAX_STEPS = 100
-    MAX_EPOCHS = 500 # Now represents number of episodes
+    MAX_EPOCHS = 3 # Now represents number of episodes (for testing)
 
     # --- Initialization ---
     model = DQNLightning(
