@@ -9,6 +9,7 @@ torchvision==0.23.0
 pytorch-lightning==2.5.5
 tensorboardX
 tensorboard
+pyyaml
 
 # Plotting:
 matplotlib==3.10.6

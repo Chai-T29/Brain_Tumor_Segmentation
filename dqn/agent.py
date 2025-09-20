@@ -1,4 +1,3 @@
-import random
 from typing import Iterable, Optional
 
 import torch
@@ -64,24 +63,32 @@ class DQNAgent:
         self.memory.push(state, action, reward, next_state, done)
 
     def select_action(self, state, greedy: bool = False) -> torch.Tensor:
-        """Selects an action using an epsilon-greedy policy."""
-        sample = random.random()
-        epsilon_threshold = 0.0 if greedy else self.current_epsilon
-        self.steps_done += 1
-        if not greedy:
-            self.current_epsilon = max(self.epsilon_end, self.current_epsilon * self._step_decay)
+        """Selects actions for a batch of states using an epsilon-greedy policy."""
+        image, bbox = state
+        if image.dim() == 3:
+            image = image.unsqueeze(0)
+        if bbox.dim() == 1:
+            bbox = bbox.unsqueeze(0)
 
-        if sample > epsilon_threshold:
-            with torch.no_grad():
-                image, bbox = state
-                if image.dim() == 3:
-                    image = image.unsqueeze(0)
-                if bbox.dim() == 1:
-                    bbox = bbox.unsqueeze(0)
-                image = image.to(self.device)
-                bbox = bbox.to(self.device)
-                return self.policy_net(image, bbox).max(1)[1].view(1, 1)
-        return torch.tensor([[random.randrange(self.num_actions)]], device=self.device, dtype=torch.long)
+        batch_size = image.size(0)
+        image = image.to(self.device)
+        bbox = bbox.to(self.device)
+
+        with torch.no_grad():
+            q_values = self.policy_net(image, bbox)
+            greedy_actions = q_values.argmax(dim=1)
+
+        if greedy:
+            return greedy_actions.detach()
+
+        epsilon = self.current_epsilon
+        random_mask = torch.rand(batch_size, device=self.device) < epsilon
+        random_actions = torch.randint(0, self.num_actions, (batch_size,), device=self.device)
+        selected_actions = torch.where(random_mask, random_actions, greedy_actions)
+
+        self.steps_done += batch_size
+        self.current_epsilon = max(self.epsilon_end, self.current_epsilon * self._step_decay)
+        return selected_actions.detach()
 
     def compute_loss(self) -> Optional[torch.Tensor]:
         """Computes the DQN loss without performing an optimization step."""

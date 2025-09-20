@@ -1,38 +1,23 @@
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Dict, Optional, Tuple
 
 import imageio.v2 as imageio
 import pytorch_lightning as pl
 import torch
-from torch.utils.data import DataLoader, Dataset, random_split
 
-from data.dataset import BrainTumorDataset
 from dqn.agent import DQNAgent
 from dqn.environment import TumorLocalizationEnv
 from dqn.model import QNetwork
 
 
-class RLDataset(Dataset):
-    """Dataset wrapper that controls how many RL iterations Lightning performs."""
-
-    def __init__(self, steps: int) -> None:
-        self.steps = max(1, steps)
-
-    def __len__(self) -> int:
-        return self.steps
-
-    def __getitem__(self, idx: int) -> int:
-        return idx
-
-
 class DQNLightning(pl.LightningModule):
-    """PyTorch Lightning module for the DQN agent."""
+    """PyTorch Lightning module for the DQN agent with vectorised environment interactions."""
 
     def __init__(
         self,
         data_dir: str,
-        batch_size: int = 64,
+        batch_size: int = 16,
         lr: float = 1e-4,
         gamma: float = 0.99,
         eps_start: float = 1.0,
@@ -41,134 +26,28 @@ class DQNLightning(pl.LightningModule):
         memory_size: int = 10000,
         target_update: int = 10,
         max_steps: int = 100,
-        train_sample_size: int = 256,
-        val_sample_size: int = 128,
-        val_interval: int = 10,
-        val_episodes: int = 5,
-        val_split: float = 0.1,
-        test_split: float = 0.1,
         grad_clip: float = 1.0,
         lr_gamma: float = 0.995,
         seed: int = 42,
-        test_gif_limit: int = 100,
+        val_interval: int = 1,
+        test_gif_limit: int = 10,
         test_gif_dir: str = "lightning_logs/test_gifs",
         test_gif_fps: int = 4,
+        iou_threshold: float = 0.8,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
         self.automatic_optimization = False
-
-        self.train_env: Optional[TumorLocalizationEnv] = None
-        self.val_env: Optional[TumorLocalizationEnv] = None
-        self.test_env: Optional[TumorLocalizationEnv] = None
-
-        self.train_state: Optional[Any] = None
-        self.val_state: Optional[Any] = None
-        self.test_state: Optional[Any] = None
 
         self.policy_net = QNetwork(num_actions=9)
         self.target_net = QNetwork(num_actions=9)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
 
-        self.agent: Optional[DQNAgent] = None
-        self._train_episode_reward = 0.0
-        self._train_episode_steps = 0
-        self._test_episode_index = 0
-        self._gif_output_dir = Path(self.hparams.test_gif_dir)
-
-    def setup(self, stage: Optional[str] = None) -> None:
-        dataset = BrainTumorDataset(data_dir=self.hparams.data_dir)
-        total_samples = len(dataset)
-        if total_samples == 0:
-            raise RuntimeError("BrainTumorDataset is empty. Please verify the dataset path and contents.")
-
-        if total_samples < 3:
-            raise RuntimeError("BrainTumorDataset must contain at least three samples to create train/val/test splits.")
-
-        base_train = 1
-        base_val = 1
-        base_test = 1
-        remaining = total_samples - (base_train + base_val + base_test)
-
-        val_ratio = max(self.hparams.val_split, 0.0)
-        test_ratio = max(self.hparams.test_split, 0.0)
-        train_ratio = max(0.0, 1.0 - val_ratio - test_ratio)
-        ratio_sum = train_ratio + val_ratio + test_ratio
-        if ratio_sum <= 0:
-            ratio_sum = 1.0
-        train_ratio /= ratio_sum
-        val_ratio /= ratio_sum
-        test_ratio /= ratio_sum
-
-        extra_train = int(round(remaining * train_ratio))
-        extra_val = int(round(remaining * val_ratio))
-        extra_test = remaining - extra_train - extra_val
-
-        train_size = base_train + max(0, extra_train)
-        val_size = base_val + max(0, extra_val)
-        test_size = base_test + max(0, extra_test)
-
-        while train_size + val_size + test_size < total_samples:
-            train_size += 1
-
-        while train_size + val_size + test_size > total_samples:
-            if train_size > base_train:
-                train_size -= 1
-            elif val_size > base_val:
-                val_size -= 1
-            elif test_size > base_test:
-                test_size -= 1
-            else:
-                break
-
-        if test_size < 1:
-            test_size = 1
-            if train_size > base_train:
-                train_size -= 1
-            else:
-                val_size = max(1, val_size - 1)
-
-        if val_size < 1:
-            val_size = 1
-            if train_size > base_train:
-                train_size -= 1
-            else:
-                test_size = max(1, test_size - 1)
-
-        total_assigned = train_size + val_size + test_size
-        if total_assigned != total_samples:
-            diff = total_samples - total_assigned
-            train_size = max(1, train_size + diff)
-
-        if train_size + val_size >= total_samples:
-            test_size = 1
-            train_size = max(1, total_samples - val_size - test_size)
-        else:
-            test_size = total_samples - train_size - val_size
-
-        if test_size < 1:
-            test_size = 1
-            train_size = max(1, total_samples - val_size - test_size)
-        generator = torch.Generator().manual_seed(self.hparams.seed)
-        splits = random_split(dataset, [train_size, val_size, total_samples - train_size - val_size], generator=generator)
-        self.train_dataset, self.val_dataset, self.test_dataset = splits
-
-        self.train_env = TumorLocalizationEnv(self.train_dataset, max_steps=self.hparams.max_steps)
-        self.val_env = TumorLocalizationEnv(self.val_dataset, max_steps=self.hparams.max_steps)
-        self.test_env = TumorLocalizationEnv(self.test_dataset, max_steps=self.hparams.max_steps)
-
-        num_actions = self.train_env.action_space.n
-        if self.policy_net.fc2.out_features != num_actions:
-            self.policy_net.fc2 = torch.nn.Linear(self.policy_net.fc2.in_features, num_actions)
-            self.target_net.fc2 = torch.nn.Linear(self.target_net.fc2.in_features, num_actions)
-            self.target_net.load_state_dict(self.policy_net.state_dict())
-            self.target_net.eval()
-
         self.agent = DQNAgent(
             policy_net=self.policy_net,
             target_net=self.target_net,
-            num_actions=num_actions,
+            num_actions=9,
             learning_rate=self.hparams.lr,
             gamma=self.hparams.gamma,
             epsilon_start=self.hparams.eps_start,
@@ -179,37 +58,67 @@ class DQNLightning(pl.LightningModule):
             target_update=self.hparams.target_update,
         )
 
+        self.train_env = TumorLocalizationEnv(max_steps=self.hparams.max_steps, iou_threshold=self.hparams.iou_threshold)
+        self.val_env = TumorLocalizationEnv(max_steps=self.hparams.max_steps, iou_threshold=self.hparams.iou_threshold)
+        self.test_env = TumorLocalizationEnv(max_steps=self.hparams.max_steps, iou_threshold=self.hparams.iou_threshold)
+
+        self._opt_steps = 0
+        self._gif_output_dir = Path(self.hparams.test_gif_dir)
+        self._test_episode_index = 0
+
     # ------------------------------------------------------------------
-    # Training utilities
+    # Training loop
     # ------------------------------------------------------------------
     def on_train_epoch_start(self) -> None:
         self.agent.set_episode_progress(self.current_epoch, getattr(self.trainer, "max_epochs", None))
-        self._train_episode_reward = 0.0
-        self._train_episode_steps = 0
-        indices = self._sample_indices(self.train_dataset, self.hparams.train_sample_size)
-        self.train_env.set_active_indices(indices)
-        self.train_state = self.train_env.reset()
 
-    def training_step(self, batch: torch.Tensor, batch_idx: int):
-        del batch  # The RL loop drives training; dataloader batch is unused.
+    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
         optimizer = self.optimizers()
         if isinstance(optimizer, list):
             optimizer = optimizer[0]
+
+        images = batch["image"].to(self.device, non_blocking=True)
+        masks = batch["mask"].to(self.device, non_blocking=True)
+
+        start_time = time.perf_counter()
+        state = self.train_env.reset(images, masks)
+        batch_size = images.size(0)
+
+        cumulative_rewards = torch.zeros(batch_size, device=self.device)
+        steps_taken = torch.zeros(batch_size, device=self.device)
+        iou_values = []
         losses = []
-        ious = []
-        episode_start = time.perf_counter()
+        active_mask = torch.ones(batch_size, dtype=torch.bool, device=self.device)
 
         for _ in range(self.hparams.max_steps):
-            action = self.agent.select_action(self.train_state)
-            next_state, reward, done, info = self.train_env.step(action.item())
-            self._train_episode_reward += reward
-            self._train_episode_steps += 1
-            ious.append(info.get("iou", 0.0))
+            actions = self.agent.select_action(state)
+            next_state, rewards, done, info = self.train_env.step(actions)
 
-            reward_tensor = torch.tensor([reward], device=self.device, dtype=torch.float32)
-            memory_next_state = None if done else next_state
-            self.agent.push_experience(self.train_state, action, reward_tensor, memory_next_state, done)
-            self.train_state = next_state
+            rewards_device = rewards.to(self.device)
+            cumulative_rewards += rewards_device
+            steps_taken += active_mask.float()
+            iou_values.append(info["iou"].to(self.device))
+
+            for idx in range(batch_size):
+                state_sample = (
+                    state[0][idx].detach().cpu().clone(),
+                    state[1][idx].detach().cpu().clone(),
+                )
+                action_sample = actions[idx].view(1, 1).detach().cpu()
+                reward_sample = rewards_device[idx].view(1).detach().cpu()
+                next_state_sample: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+                if not bool(done[idx].item()):
+                    next_state_sample = (
+                        next_state[0][idx].detach().cpu().clone(),
+                        next_state[1][idx].detach().cpu().clone(),
+                    )
+                self.agent.push_experience(
+                    state_sample,
+                    action_sample,
+                    reward_sample,
+                    next_state_sample,
+                    bool(done[idx].item()),
+                )
 
             loss = self.agent.compute_loss()
             if loss is not None:
@@ -218,27 +127,30 @@ class DQNLightning(pl.LightningModule):
                 torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.hparams.grad_clip)
                 optimizer.step()
                 losses.append(loss.detach())
-                if (self.global_step + 1) % self.hparams.target_update == 0:
+                self._opt_steps += 1
+                if self._opt_steps % self.hparams.target_update == 0:
                     self.agent.update_target_net()
 
-            if done:
+            state = next_state
+            active_mask = active_mask & ~done.to(self.device)
+            if not active_mask.any():
                 break
 
-        episode_time = time.perf_counter() - episode_start
-        mean_loss = torch.stack(losses).mean() if losses else torch.tensor(0.0, device=self.device, dtype=torch.float32)
-        mean_iou = sum(ious) / max(1, len(ious))
-        step_time = episode_time / max(1, self._train_episode_steps)
+        episode_time = time.perf_counter() - start_time
 
-        reward_tensor = torch.tensor(self._train_episode_reward, device=self.device, dtype=torch.float32)
-        length_tensor = torch.tensor(self._train_episode_steps, device=self.device, dtype=torch.float32)
-        mean_iou_tensor = torch.tensor(mean_iou, device=self.device, dtype=torch.float32)
-        epsilon_tensor = torch.tensor(self.agent.current_epsilon, device=self.device, dtype=torch.float32)
-        step_time_tensor = torch.tensor(step_time, device=self.device, dtype=torch.float32)
+        mean_loss = torch.stack(losses).mean() if losses else torch.tensor(0.0, device=self.device)
+        mean_iou = torch.cat(iou_values).mean() if iou_values else torch.tensor(0.0, device=self.device)
+        avg_reward = cumulative_rewards.mean()
+        avg_length = steps_taken.mean()
+        step_time = episode_time / max(1.0, float(steps_taken.max().item()))
 
-        self.log("train/episode_reward", reward_tensor, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log("train/episode_length", length_tensor, on_epoch=True, sync_dist=True)
+        epsilon_tensor = torch.tensor(self.agent.current_epsilon, device=self.device)
+        step_time_tensor = torch.tensor(step_time, device=self.device)
+
+        self.log("train/episode_reward", avg_reward, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("train/episode_length", avg_length, on_epoch=True, sync_dist=True)
         self.log("train/loss", mean_loss, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log("train/mean_iou", mean_iou_tensor, on_epoch=True, sync_dist=True)
+        self.log("train/mean_iou", mean_iou, on_epoch=True, sync_dist=True)
         self.log("train/epsilon", epsilon_tensor, on_epoch=True, sync_dist=True)
         self.log("train/step_time_sec", step_time_tensor, on_epoch=True, sync_dist=True)
 
@@ -253,131 +165,102 @@ class DQNLightning(pl.LightningModule):
             else:
                 schedulers.step()
 
-        optimizers = self.optimizers()
-        if isinstance(optimizers, list):
-            optimizer = optimizers[0]
-        else:
-            optimizer = optimizers
+        optimizer = self.optimizers()
+        if isinstance(optimizer, list):
+            optimizer = optimizer[0]
         current_lr = optimizer.param_groups[0]["lr"]
-        self.log("train/lr", torch.tensor(current_lr, device=self.device, dtype=torch.float32), on_epoch=True, prog_bar=False, sync_dist=True)
+        self.log("train/lr", torch.tensor(current_lr, device=self.device), on_epoch=True, sync_dist=True)
 
     # ------------------------------------------------------------------
-    # Validation
+    # Validation & testing helpers
     # ------------------------------------------------------------------
-    def on_validation_epoch_start(self) -> None:
-        indices = self._sample_indices(self.val_dataset, self.hparams.val_sample_size)
-        self.val_env.set_active_indices(indices)
-        self.val_state = self.val_env.reset()
-
-    def validation_step(self, batch: torch.Tensor, batch_idx: int):
-        del batch
-        start_time = time.perf_counter()
-        episode_reward = 0.0
-        steps = 0
-        ious = []
-
-        state = self.val_state
-        for _ in range(self.hparams.max_steps):
-            action = self.agent.select_action(state, greedy=True)
-            next_state, reward, done, info = self.val_env.step(action.item())
-            episode_reward += reward
-            ious.append(info.get("iou", 0.0))
-            state = next_state
-            steps += 1
-            if done:
-                break
-
-        self.val_state = self.val_env.reset()
-        episode_time = time.perf_counter() - start_time
-        mean_iou = sum(ious) / max(1, len(ious))
-        metrics = {
-            "val/avg_reward": torch.tensor(episode_reward, device=self.device, dtype=torch.float32),
-            "val/episode_length": torch.tensor(steps, device=self.device, dtype=torch.float32),
-            "val/mean_iou": torch.tensor(mean_iou, device=self.device, dtype=torch.float32),
-            "val/step_time_sec": torch.tensor(episode_time / max(1, steps), device=self.device, dtype=torch.float32),
-        }
-        for name, value in metrics.items():
-            self.log(name, value, on_step=False, on_epoch=True, prog_bar=name == "val/avg_reward", sync_dist=True)
+    def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
+        metrics, _ = self._simulate_environment(self.val_env, batch, greedy=True, record=False)
+        self._log_metrics(metrics, prefix="val")
         return metrics
 
-    # ------------------------------------------------------------------
-    # Testing
-    # ------------------------------------------------------------------
     def on_test_epoch_start(self) -> None:
-        total = len(self.test_dataset)
-        limit = min(total, self.hparams.test_gif_limit)
-        generator = torch.Generator().manual_seed(self.hparams.seed + 2024)
-        permutation = torch.randperm(total, generator=generator).tolist()
-        self._test_indices = permutation[:limit]
-        self.test_env.set_active_indices(self._test_indices, sequential=True)
-        self.test_state = self.test_env.reset()
         self._gif_output_dir.mkdir(parents=True, exist_ok=True)
         self._test_episode_index = 0
 
-    def test_step(self, batch: torch.Tensor, batch_idx: int):
-        del batch
-        frames = []
-        episode_reward = 0.0
-        steps = 0
-        ious = []
+    def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
+        record = self._test_episode_index < self.hparams.test_gif_limit
+        metrics, frames = self._simulate_environment(
+            self.test_env,
+            batch,
+            greedy=True,
+            record=record,
+        )
+        self._log_metrics(metrics, prefix="test")
 
-        state = self.test_state
-        frames.append(self.test_env.render(mode="rgb_array"))
-        for _ in range(self.hparams.max_steps):
-            action = self.agent.select_action(state, greedy=True)
-            next_state, reward, done, info = self.test_env.step(action.item())
-            frames.append(self.test_env.render(mode="rgb_array"))
-            episode_reward += reward
-            ious.append(info.get("iou", 0.0))
-            state = next_state
-            steps += 1
-            if done:
-                break
+        if record and frames:
+            reward_value = metrics["avg_reward"].item()
+            gif_name = f"episode_{self._test_episode_index:03d}_reward_{reward_value:.2f}.gif"
+            imageio.mimsave(self._gif_output_dir / gif_name, frames, fps=self.hparams.test_gif_fps)
+            self._test_episode_index += 1
 
-        gif_name = f"episode_{self._test_episode_index:03d}_reward_{episode_reward:.2f}.gif"
-        imageio.mimsave(self._gif_output_dir / gif_name, frames, fps=self.hparams.test_gif_fps)
-        self._test_episode_index += 1
-        self.test_state = self.test_env.reset()
-
-        mean_iou = sum(ious) / max(1, len(ious))
-        metrics = {
-            "test/avg_reward": torch.tensor(episode_reward, device=self.device, dtype=torch.float32),
-            "test/episode_length": torch.tensor(steps, device=self.device, dtype=torch.float32),
-            "test/mean_iou": torch.tensor(mean_iou, device=self.device, dtype=torch.float32),
-        }
-        for name, value in metrics.items():
-            self.log(name, value, on_step=False, on_epoch=True, prog_bar=name == "test/avg_reward", sync_dist=True)
         return metrics
 
     # ------------------------------------------------------------------
-    # Dataloaders & optimizers
+    # Optimizers
     # ------------------------------------------------------------------
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=self.hparams.lr)
         scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=self.hparams.lr_gamma)
         return [optimizer], [scheduler]
 
-    def train_dataloader(self):
-        return DataLoader(RLDataset(steps=1), batch_size=1)
-
-    def val_dataloader(self):
-        episodes = max(1, self.hparams.val_episodes)
-        return DataLoader(RLDataset(steps=episodes), batch_size=1)
-
-    def test_dataloader(self):
-        total = len(getattr(self, "_test_indices", [])) or len(self.test_dataset)
-        total = max(1, min(total, self.hparams.test_gif_limit))
-        return DataLoader(RLDataset(steps=total), batch_size=1)
-
     # ------------------------------------------------------------------
-    # Helpers
+    # Utilities
     # ------------------------------------------------------------------
-    @staticmethod
-    def _sample_indices(dataset, sample_size: int):
-        if dataset is None or sample_size is None or sample_size <= 0:
-            return None
-        total = len(dataset)
-        if total == 0:
-            return None
-        sample_size = min(sample_size, total)
-        return torch.randperm(total)[:sample_size].tolist()
+    def _simulate_environment(
+        self,
+        env: TumorLocalizationEnv,
+        batch: Dict[str, torch.Tensor],
+        greedy: bool,
+        record: bool,
+        record_index: int = 0,
+    ) -> Tuple[Dict[str, torch.Tensor], Optional[list]]:
+        images = batch["image"].to(self.device, non_blocking=True)
+        masks = batch["mask"].to(self.device, non_blocking=True)
+
+        state = env.reset(images, masks)
+        batch_size = images.size(0)
+        cumulative_rewards = torch.zeros(batch_size, device=self.device)
+        steps_taken = torch.zeros(batch_size, device=self.device)
+        iou_values = []
+        active_mask = torch.ones(batch_size, dtype=torch.bool, device=self.device)
+        frames = []
+
+        if record:
+            frames.append(env.render(index=record_index, mode="rgb_array"))
+
+        for _ in range(self.hparams.max_steps):
+            actions = self.agent.select_action(state, greedy=greedy)
+            next_state, rewards, done, info = env.step(actions)
+
+            rewards_device = rewards.to(self.device)
+            cumulative_rewards += rewards_device
+            steps_taken += active_mask.float()
+            iou_values.append(info["iou"].to(self.device))
+
+            state = next_state
+
+            if record:
+                frames.append(env.render(index=record_index, mode="rgb_array"))
+
+            active_mask = active_mask & ~done.to(self.device)
+            if not active_mask.any():
+                break
+
+        metrics = {
+            "avg_reward": cumulative_rewards.mean(),
+            "episode_length": steps_taken.mean(),
+            "mean_iou": torch.cat(iou_values).mean() if iou_values else torch.tensor(0.0, device=self.device),
+        }
+        return metrics, frames if record else None
+
+    def _log_metrics(self, metrics: Dict[str, torch.Tensor], prefix: str) -> None:
+        for name, value in metrics.items():
+            log_name = f"{prefix}/{name}"
+            self.log(log_name, value, on_step=False, on_epoch=True, prog_bar=(name == "avg_reward"), sync_dist=True)
+
