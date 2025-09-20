@@ -59,8 +59,8 @@ class DQNAgent:
 
         # Unpack the batch
         state_batch = batch.state
-        action_batch = torch.cat(batch.action)
-        reward_batch = torch.cat(batch.reward)
+        action_batch = torch.cat(batch.action).to(self.device)
+        reward_batch = torch.cat(batch.reward).to(self.device)
         next_state_batch = batch.next_state
 
         # Separate image and bbox from state
@@ -71,13 +71,21 @@ class DQNAgent:
         state_action_values = self.policy_net(image_batch, bbox_batch).gather(1, action_batch)
 
         # Compute V(s_{t+1}) for all next states.
-        non_final_mask = torch.tensor(tuple(map(lambda s: s is not None, next_state_batch)), device=self.device, dtype=torch.bool)
-        
-        non_final_next_images = torch.stack([s[0] for s in next_state_batch if s is not None]).to(self.device)
-        non_final_next_bboxes = torch.stack([s[1] for s in next_state_batch if s is not None]).to(self.device)
+        non_final_mask_list = []
+        non_final_next_states = []
+        for next_state, done in zip(next_state_batch, batch.done):
+            is_non_final = (next_state is not None) and (not done)
+            non_final_mask_list.append(is_non_final)
+            if is_non_final:
+                non_final_next_states.append(next_state)
+
+        non_final_mask = torch.tensor(non_final_mask_list, device=self.device, dtype=torch.bool)
 
         next_state_values = torch.zeros(self.batch_size, device=self.device)
-        next_state_values[non_final_mask] = self.target_net(non_final_next_images, non_final_next_bboxes).max(1)[0].detach()
+        if non_final_next_states:
+            non_final_next_images = torch.stack([s[0] for s in non_final_next_states]).to(self.device)
+            non_final_next_bboxes = torch.stack([s[1] for s in non_final_next_states]).to(self.device)
+            next_state_values[non_final_mask] = self.target_net(non_final_next_images, non_final_next_bboxes).max(1)[0].detach()
 
         # Compute the expected Q values
         expected_state_action_values = (next_state_values * self.gamma) + reward_batch
@@ -91,6 +99,8 @@ class DQNAgent:
         for param in self.policy_net.parameters():
             param.grad.data.clamp_(-1, 1)
         self.optimizer.step()
+
+        return loss.item()
 
     def update_target_net(self):
         """Updates the target network with the policy network's weights."""
