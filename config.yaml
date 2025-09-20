@@ -1,0 +1,36 @@
+data:
+  data_dir: "MU-Glioma-Post/"
+  batch_size: 16
+  num_workers: 4
+  persistent_workers: true
+  pin_memory: true
+  val_split: 0.1
+  test_split: 0.1
+
+training:
+  batch_size: 16
+  lr: 0.0001
+  gamma: 0.99
+  eps_start: 1.0
+  eps_end: 0.05
+  eps_decay: 2000
+  memory_size: 50000
+  target_update: 10
+  max_steps: 100
+  grad_clip: 1.0
+  lr_gamma: 0.995
+  seed: 42
+  val_interval: 1
+  max_epochs: 200
+
+environment:
+  iou_threshold: 0.8
+
+logging:
+  log_dir: "lightning_logs"
+  logger_name: "dqn_agent"
+  checkpoint_dir: "lightning_logs/checkpoints"
+  test_gif_limit: 10
+  test_gif_dir: "lightning_logs/test_gifs"
+  test_gif_fps: 4
+  early_stopping_patience: 20

@@ -1,50 +1,60 @@
+import yaml
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 
+from data.data_module import BrainTumorDataModule
 from dqn.lightning_model import DQNLightning
 
 
+def load_config(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as config_file:
+        return yaml.safe_load(config_file)
+
+
 def main():
-    """Main function to train the DQN agent using PyTorch Lightning."""
-    DATA_DIR = "MU-Glioma-Post/"
-    BATCH_SIZE = 64
-    LEARNING_RATE = 1e-4
-    GAMMA = 0.99
-    EPSILON_START = 1.0
-    EPSILON_END = 0.05
-    EPSILON_DECAY = 2000
-    MEMORY_SIZE = 50000
-    TARGET_UPDATE = 10
-    MAX_STEPS_PER_EPISODE = 100
-    MAX_EPISODES = 200
-    TRAIN_SAMPLE_SIZE = 512
-    VAL_SAMPLE_SIZE = 256
-    VAL_EPISODES = 8
-    LR_GAMMA = 0.995
-    TEST_GIF_LIMIT = 100
+    config = load_config("config.yaml")
+
+    data_cfg = config.get("data", {})
+    training_cfg = config.get("training", {})
+    env_cfg = config.get("environment", {})
+    logging_cfg = config.get("logging", {})
+
+    data_module = BrainTumorDataModule(
+        data_dir=data_cfg.get("data_dir", "MU-Glioma-Post/"),
+        batch_size=data_cfg.get("batch_size", 16),
+        num_workers=data_cfg.get("num_workers", 0),
+        persistent_workers=data_cfg.get("persistent_workers", False),
+        pin_memory=data_cfg.get("pin_memory", False),
+        val_split=data_cfg.get("val_split", 0.1),
+        test_split=data_cfg.get("test_split", 0.1),
+        seed=training_cfg.get("seed", 42),
+    )
 
     model = DQNLightning(
-        data_dir=DATA_DIR,
-        batch_size=BATCH_SIZE,
-        lr=LEARNING_RATE,
-        gamma=GAMMA,
-        eps_start=EPSILON_START,
-        eps_end=EPSILON_END,
-        eps_decay=EPSILON_DECAY,
-        memory_size=MEMORY_SIZE,
-        target_update=TARGET_UPDATE,
-        max_steps=MAX_STEPS_PER_EPISODE,
-        train_sample_size=TRAIN_SAMPLE_SIZE,
-        val_sample_size=VAL_SAMPLE_SIZE,
-        val_episodes=VAL_EPISODES,
-        lr_gamma=LR_GAMMA,
-        test_gif_limit=TEST_GIF_LIMIT,
+        data_dir=data_cfg.get("data_dir", "MU-Glioma-Post/"),
+        batch_size=training_cfg.get("batch_size", data_cfg.get("batch_size", 16)),
+        lr=training_cfg.get("lr", 1e-4),
+        gamma=training_cfg.get("gamma", 0.99),
+        eps_start=training_cfg.get("eps_start", 1.0),
+        eps_end=training_cfg.get("eps_end", 0.05),
+        eps_decay=training_cfg.get("eps_decay", 2000),
+        memory_size=training_cfg.get("memory_size", 50000),
+        target_update=training_cfg.get("target_update", 10),
+        max_steps=training_cfg.get("max_steps", 100),
+        grad_clip=training_cfg.get("grad_clip", 1.0),
+        lr_gamma=training_cfg.get("lr_gamma", 0.995),
+        seed=training_cfg.get("seed", 42),
+        val_interval=training_cfg.get("val_interval", 1),
+        test_gif_limit=logging_cfg.get("test_gif_limit", 10),
+        test_gif_dir=logging_cfg.get("test_gif_dir", "lightning_logs/test_gifs"),
+        test_gif_fps=logging_cfg.get("test_gif_fps", 4),
+        iou_threshold=env_cfg.get("iou_threshold", 0.8),
     )
 
     checkpoint_callback = ModelCheckpoint(
         monitor="val/avg_reward",
-        dirpath="lightning_logs/checkpoints",
+        dirpath=logging_cfg.get("checkpoint_dir", "lightning_logs/checkpoints"),
         filename="dqn-epoch{epoch:02d}-reward{val_avg_reward:.2f}",
         save_top_k=3,
         mode="max",
@@ -53,18 +63,21 @@ def main():
     early_stopping = EarlyStopping(
         monitor="val/avg_reward",
         min_delta=1e-3,
-        patience=20,
+        patience=logging_cfg.get("early_stopping_patience", 20),
         mode="max",
         verbose=True,
     )
 
-    logger = TensorBoardLogger(save_dir="lightning_logs", name="dqn_agent")
+    logger = TensorBoardLogger(
+        save_dir=logging_cfg.get("log_dir", "lightning_logs"),
+        name=logging_cfg.get("logger_name", "dqn_agent"),
+    )
 
     trainer = pl.Trainer(
         accelerator="auto",
         devices="auto",
         strategy="auto",
-        max_epochs=MAX_EPISODES,
+        max_epochs=training_cfg.get("max_epochs", 200),
         check_val_every_n_epoch=model.hparams.val_interval,
         callbacks=[checkpoint_callback, early_stopping],
         logger=logger,
@@ -73,10 +86,9 @@ def main():
         deterministic=True,
     )
 
-    trainer.fit(model)
-
-    trainer.validate(model, ckpt_path="best")
-    trainer.test(model, ckpt_path="best")
+    trainer.fit(model, datamodule=data_module)
+    trainer.validate(model, datamodule=data_module, ckpt_path="best")
+    trainer.test(model, datamodule=data_module, ckpt_path="best")
 
 
 if __name__ == "__main__":

@@ -1,38 +1,40 @@
-import torch
-import os
 import glob
-import imageio
-from dqn.lightning_model import DQNLightning
-from dqn.environment import TumorLocalizationEnv
-from data.dataset import BrainTumorDataset
-from torch.utils.data import random_split
+import os
+from pathlib import Path
+from typing import Dict
 
-def find_best_checkpoint(checkpoint_dir):
-    """Finds the checkpoint with the lowest validation loss."""
-    checkpoints = glob.glob(os.path.join(checkpoint_dir, '*.ckpt'))
+import imageio
+import torch
+import yaml
+
+from data.data_module import BrainTumorDataModule
+from dqn.environment import TumorLocalizationEnv
+from dqn.lightning_model import DQNLightning
+
+
+def load_config(path: str) -> Dict:
+    with open(path, "r", encoding="utf-8") as config_file:
+        return yaml.safe_load(config_file)
+
+
+def find_best_checkpoint(checkpoint_dir: str) -> str | None:
+    checkpoints = glob.glob(os.path.join(checkpoint_dir, "*.ckpt"))
     if not checkpoints:
         return None
-    
-    best_checkpoint = None
-    best_loss = float('inf')
-    for ckpt in checkpoints:
-        try:
-            val_loss_str = os.path.basename(ckpt).split('val_loss=')[1]
-            val_loss = float(val_loss_str.split('.ckpt')[0])
-            if val_loss < best_loss:
-                best_loss = val_loss
-                best_checkpoint = ckpt
-        except (ValueError, IndexError):
-            continue
-            
-    return best_checkpoint
+
+    checkpoints.sort(key=os.path.getmtime, reverse=True)
+    return checkpoints[0]
+
 
 def main():
-    CHECKPOINT_DIR = 'lightning_logs/checkpoints'
-    DATA_DIR = "MU-Glioma-Post/"
-    VIDEO_PATH = "dqn_test_episode.gif"
+    config = load_config("config.yaml")
+    data_cfg = config.get("data", {})
+    training_cfg = config.get("training", {})
+    env_cfg = config.get("environment", {})
+    logging_cfg = config.get("logging", {})
 
-    best_checkpoint_path = find_best_checkpoint(CHECKPOINT_DIR)
+    checkpoint_dir = logging_cfg.get("checkpoint_dir", "lightning_logs/checkpoints")
+    best_checkpoint_path = find_best_checkpoint(checkpoint_dir)
 
     if not best_checkpoint_path:
         print("No checkpoints found. Please train a model first.")
@@ -40,32 +42,54 @@ def main():
 
     print(f"Loading model from: {best_checkpoint_path}")
     model = DQNLightning.load_from_checkpoint(best_checkpoint_path)
-    model.setup()
     model.eval()
+    model.to(torch.device("cpu"))
 
-    full_dataset = BrainTumorDataset(data_dir=DATA_DIR)
-    train_size = int(0.8 * len(full_dataset))
-    val_size = len(full_dataset) - train_size
-    _, val_dataset = random_split(full_dataset, [train_size, val_size])
-    test_env = TumorLocalizationEnv(val_dataset)
+    data_module = BrainTumorDataModule(
+        data_dir=data_cfg.get("data_dir", "MU-Glioma-Post/"),
+        batch_size=data_cfg.get("batch_size", 16),
+        num_workers=data_cfg.get("num_workers", 0),
+        persistent_workers=False,
+        pin_memory=False,
+        val_split=data_cfg.get("val_split", 0.1),
+        test_split=data_cfg.get("test_split", 0.1),
+        seed=training_cfg.get("seed", 42),
+    )
+    data_module.setup("test")
 
-    state = test_env.reset()
-    done = False
-    total_reward = 0
-    frames = []
+    val_loader = data_module.val_dataloader()
+    if val_loader is None:
+        print("Validation dataloader is not available.")
+        return
 
-    while not done:
-        frame = test_env.render(mode='rgb_array')
-        frames.append(frame)
+    batch = next(iter(val_loader))
+    images = batch["image"][:1]
+    masks = batch["mask"][:1]
+
+    env = TumorLocalizationEnv(max_steps=model.hparams.max_steps, iou_threshold=env_cfg.get("iou_threshold", 0.8))
+    state = env.reset(images, masks)
+
+    total_reward = 0.0
+    frames = [env.render(index=0, mode="rgb_array")]
+    done = torch.zeros(images.size(0), dtype=torch.bool)
+
+    while not done.all():
         action = model.agent.select_action(state, greedy=True)
-        state, reward, done, _ = test_env.step(action.item())
-        total_reward += reward
+        next_state, rewards, done, _ = env.step(action)
+        frames.append(env.render(index=0, mode="rgb_array"))
+        total_reward += float(rewards[0].item())
+        state = next_state
 
-    print(f"Test episode finished with a total reward of: {total_reward}")
-    test_env.close()
+    env.close()
 
-    print(f"Saving video to {VIDEO_PATH}")
-    imageio.mimsave(VIDEO_PATH, frames, fps=5)
+    output_dir = Path(logging_cfg.get("test_gif_dir", "lightning_logs/test_gifs"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    video_path = output_dir / "dqn_test_episode.gif"
+
+    print(f"Test episode finished with a total reward of: {total_reward:.2f}")
+    print(f"Saving video to {video_path}")
+    imageio.mimsave(video_path, frames, fps=logging_cfg.get("test_gif_fps", 4))
+
 
 if __name__ == "__main__":
     main()
