@@ -1,44 +1,79 @@
-import torch
-import torch.optim as optim
 import random
-import math
-from dqn.model import QNetwork
-from dqn.replay_memory import ReplayMemory, Experience
+from typing import Iterable, Optional
+
+import torch
 import torch.nn.functional as F
+
+from dqn.replay_memory import Experience, ReplayMemory
+
 
 class DQNAgent:
     """The DQN Agent that interacts with and learns from the environment."""
-    def __init__(self, policy_net, target_net, num_actions, learning_rate=1e-4, gamma=0.99, epsilon_start=1.0, epsilon_end=0.1, epsilon_decay=1000, memory_size=10000, batch_size=64, target_update=10):
+
+    def __init__(
+        self,
+        policy_net,
+        target_net,
+        num_actions,
+        learning_rate: float = 1e-4,
+        gamma: float = 0.99,
+        epsilon_start: float = 1.0,
+        epsilon_end: float = 0.05,
+        epsilon_decay: int = 1000,
+        memory_size: int = 10000,
+        batch_size: int = 64,
+        target_update: int = 10,
+    ) -> None:
         self.num_actions = num_actions
+        self.learning_rate = learning_rate
         self.gamma = gamma
         self.epsilon_start = epsilon_start
         self.epsilon_end = epsilon_end
-        self.epsilon_decay = epsilon_decay
+        self.epsilon_decay = max(1, epsilon_decay)
         self.batch_size = batch_size
         self.target_update = target_update
-
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.policy_net = policy_net
         self.target_net = target_net
 
-        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=learning_rate)
         self.memory = ReplayMemory(memory_size)
         self.steps_done = 0
+        self.current_epsilon = max(0.0, epsilon_start)
+        if self.epsilon_start <= 0:
+            self._step_decay = 1.0
+        else:
+            ratio = max(self.epsilon_end, 1e-12) / self.epsilon_start
+            self._step_decay = ratio ** (1.0 / self.epsilon_decay)
 
-    def select_action(self, state, greedy=False):
+    @property
+    def device(self) -> torch.device:
+        return next(self.policy_net.parameters()).device
+
+    def reset_memory(self) -> None:
+        self.memory = ReplayMemory(self.memory.capacity)
+
+    def set_episode_progress(self, episode_idx: int, total_episodes: Optional[int]) -> None:
+        """Update epsilon-greedy exploration schedule for a new episode."""
+        if total_episodes is None or total_episodes <= 1:
+            progress = 0.0
+        else:
+            progress = min(max(episode_idx, 0), total_episodes - 1) / (total_episodes - 1)
+        self.current_epsilon = self.epsilon_start - progress * (self.epsilon_start - self.epsilon_end)
+
+    def push_experience(self, state, action, reward, next_state, done) -> None:
+        self.memory.push(state, action, reward, next_state, done)
+
+    def select_action(self, state, greedy: bool = False) -> torch.Tensor:
         """Selects an action using an epsilon-greedy policy."""
         sample = random.random()
-        # Epsilon decay
-        eps_threshold = self.epsilon_end + (self.epsilon_start - self.epsilon_end) * \
-            math.exp(-1. * self.steps_done / self.epsilon_decay)
+        epsilon_threshold = 0.0 if greedy else self.current_epsilon
         self.steps_done += 1
+        if not greedy:
+            self.current_epsilon = max(self.epsilon_end, self.current_epsilon * self._step_decay)
 
-        if greedy or sample > eps_threshold:
+        if sample > epsilon_threshold:
             with torch.no_grad():
-                # state is a tuple (image, bbox)
                 image, bbox = state
-                # Add a batch dimension if not present
                 if image.dim() == 3:
                     image = image.unsqueeze(0)
                 if bbox.dim() == 1:
@@ -46,31 +81,26 @@ class DQNAgent:
                 image = image.to(self.device)
                 bbox = bbox.to(self.device)
                 return self.policy_net(image, bbox).max(1)[1].view(1, 1)
-        else:
-            return torch.tensor([[random.randrange(self.num_actions)]], device=self.device, dtype=torch.long)
+        return torch.tensor([[random.randrange(self.num_actions)]], device=self.device, dtype=torch.long)
 
-    def optimize_model(self):
-        """Performs a single step of the optimization."""
+    def compute_loss(self) -> Optional[torch.Tensor]:
+        """Computes the DQN loss without performing an optimization step."""
         if len(self.memory) < self.batch_size:
-            return
+            return None
 
         experiences = self.memory.sample(self.batch_size)
         batch = Experience(*zip(*experiences))
 
-        # Unpack the batch
         state_batch = batch.state
         action_batch = torch.cat(batch.action).to(self.device)
         reward_batch = torch.cat(batch.reward).to(self.device)
         next_state_batch = batch.next_state
 
-        # Separate image and bbox from state
         image_batch = torch.stack([s[0] for s in state_batch]).to(self.device)
         bbox_batch = torch.stack([s[1] for s in state_batch]).to(self.device)
 
-        # Compute Q(s_t, a)
         state_action_values = self.policy_net(image_batch, bbox_batch).gather(1, action_batch)
 
-        # Compute V(s_{t+1}) for all next states.
         non_final_mask_list = []
         non_final_next_states = []
         for next_state, done in zip(next_state_batch, batch.done):
@@ -85,23 +115,20 @@ class DQNAgent:
         if non_final_next_states:
             non_final_next_images = torch.stack([s[0] for s in non_final_next_states]).to(self.device)
             non_final_next_bboxes = torch.stack([s[1] for s in non_final_next_states]).to(self.device)
-            next_state_values[non_final_mask] = self.target_net(non_final_next_images, non_final_next_bboxes).max(1)[0].detach()
+            next_state_values[non_final_mask] = (
+                self.target_net(non_final_next_images, non_final_next_bboxes).max(1)[0].detach()
+            )
 
-        # Compute the expected Q values
         expected_state_action_values = (next_state_values * self.gamma) + reward_batch
-
-        # Compute Huber loss
         loss = F.smooth_l1_loss(state_action_values, expected_state_action_values.unsqueeze(1))
+        return loss
 
-        # Optimize the model
-        self.optimizer.zero_grad()
-        loss.backward()
-        for param in self.policy_net.parameters():
-            param.grad.data.clamp_(-1, 1)
-        self.optimizer.step()
-
-        return loss.item()
-
-    def update_target_net(self):
+    def update_target_net(self) -> None:
         """Updates the target network with the policy network's weights."""
         self.target_net.load_state_dict(self.policy_net.state_dict())
+
+    def parameters(self) -> Iterable[torch.nn.Parameter]:
+        return self.policy_net.parameters()
+
+    def state_dict(self) -> dict:
+        return self.policy_net.state_dict()

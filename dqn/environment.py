@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from torchvision.transforms import transforms
 
+
 def calculate_iou(box1, box2):
     """Calculates Intersection over Union for two bounding boxes."""
     x1, y1, w1, h1 = box1
@@ -24,21 +25,26 @@ def calculate_iou(box1, box2):
     iou = inter_area / union_area if union_area > 0 else 0
     return iou
 
+
 class TumorLocalizationEnv(gym.Env):
     """A custom Gym environment for tumor localization."""
+
     def __init__(self, dataset, max_steps=100, iou_threshold=0.8):
         super(TumorLocalizationEnv, self).__init__()
 
         self.dataset = dataset
         self.max_steps = max_steps
         self.iou_threshold = iou_threshold
+        self._indices_pool = None
+        self._sequential_mode = False
+        self._sequential_cursor = 0
 
-        self.action_space = spaces.Discrete(9) # up, down, left, right, expand_h, shrink_h, expand_v, shrink_v, stop
+        self.action_space = spaces.Discrete(9)  # up, down, left, right, expand_h, shrink_h, expand_v, shrink_v, stop
         self.observation_space = spaces.Tuple((
             spaces.Box(low=0, high=1, shape=(3, 84, 84), dtype=np.float32),
-            spaces.Box(low=0, high=240, shape=(4,), dtype=np.float32) # x, y, w, h
+            spaces.Box(low=0, high=240, shape=(4,), dtype=np.float32)  # x, y, w, h
         ))
-        
+
         self.transform = transforms.Compose([
             transforms.ToPILImage(),
             transforms.Resize((84, 84)),
@@ -46,7 +52,16 @@ class TumorLocalizationEnv(gym.Env):
         ])
 
     def reset(self):
-        self.current_sample_idx = np.random.randint(0, len(self.dataset))
+        if self._indices_pool:
+            if self._sequential_mode:
+                if self._sequential_cursor >= len(self._indices_pool):
+                    self._sequential_cursor = 0
+                self.current_sample_idx = int(self._indices_pool[self._sequential_cursor])
+                self._sequential_cursor += 1
+            else:
+                self.current_sample_idx = int(np.random.choice(self._indices_pool))
+        else:
+            self.current_sample_idx = np.random.randint(0, len(self.dataset))
         sample = self.dataset[self.current_sample_idx]
         self.image = sample['image']
         self.mask = sample['mask']
@@ -74,7 +89,7 @@ class TumorLocalizationEnv(gym.Env):
         self.last_iou = iou
 
         done = False
-        if action == 8: # Stop action
+        if action == 8:  # Stop action
             done = True
             reward += 1.0 if iou > self.iou_threshold else -1.0
 
@@ -106,21 +121,21 @@ class TumorLocalizationEnv(gym.Env):
         step_size = 10
         scale_factor = 1.1
 
-        if action == 0: # Move up
+        if action == 0:  # Move up
             y = max(0, y - step_size)
-        elif action == 1: # Move down
+        elif action == 1:  # Move down
             y = min(img_height - h, y + step_size)
-        elif action == 2: # Move left
+        elif action == 2:  # Move left
             x = max(0, x - step_size)
-        elif action == 3: # Move right
+        elif action == 3:  # Move right
             x = min(img_width - w, x + step_size)
-        elif action == 4: # Expand horizontally
+        elif action == 4:  # Expand horizontally
             w = min(img_width, int(w * scale_factor))
-        elif action == 5: # Shrink horizontally
+        elif action == 5:  # Shrink horizontally
             w = max(10, int(w / scale_factor))
-        elif action == 6: # Expand vertically
+        elif action == 6:  # Expand vertically
             h = min(img_height, int(h * scale_factor))
-        elif action == 7: # Shrink vertically
+        elif action == 7:  # Shrink vertically
             h = max(10, int(h / scale_factor))
         # action 8 is stop
 
@@ -148,7 +163,7 @@ class TumorLocalizationEnv(gym.Env):
         x, y, w, h = self.current_bbox
         agent_rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor='r', facecolor='none', label='Agent')
         ax.add_patch(agent_rect)
-        
+
         plt.legend()
 
         if mode == 'human':
@@ -163,3 +178,15 @@ class TumorLocalizationEnv(gym.Env):
 
     def close(self):
         pass
+
+    def set_active_indices(self, indices, sequential: bool = False):
+        """Restrict sampling to a predefined set of dataset indices."""
+        if indices is None:
+            self._indices_pool = None
+            self._sequential_mode = False
+            self._sequential_cursor = 0
+        else:
+            valid_indices = [int(i) for i in indices if 0 <= int(i) < len(self.dataset)]
+            self._indices_pool = valid_indices if valid_indices else None
+            self._sequential_mode = sequential and bool(self._indices_pool)
+            self._sequential_cursor = 0
