@@ -236,9 +236,13 @@ class TumorLocalizationEnv:
 
         max_x = torch.clamp(width_limit - w, min=0.0)
         max_y = torch.clamp(height_limit - h, min=0.0)
-        x = torch.clamp(x, min=0.0, max=max_x)
-        y = torch.clamp(y, min=0.0, max=max_y)
 
+        zero_x = torch.zeros_like(x)
+        zero_y = torch.zeros_like(y)
+
+        x = torch.clamp(x, min=zero_x, max=max_x)
+        y = torch.clamp(y, min=zero_y, max=max_y)
+        
         return torch.stack((x, y, w, h), dim=1)
 
     def _get_bbox_from_mask(self, masks: torch.Tensor) -> torch.Tensor:
