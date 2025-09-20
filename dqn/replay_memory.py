@@ -6,7 +6,9 @@ Experience = namedtuple('Experience',
 
 class ReplayMemory:
     """A cyclic buffer of bounded size that holds the experiences observed recently."""
+
     def __init__(self, capacity):
+        self.capacity = capacity
         self.memory = deque([], maxlen=capacity)
 
     def push(self, *args):

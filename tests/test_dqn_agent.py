@@ -106,6 +106,7 @@ def test_optimize_model_handles_terminal_transition():
             assert expected_targets[idx].item() == pytest.approx(rewards[idx])
 
     random.seed(0)
-    loss_value = agent.optimize_model()
+    loss_value = agent.compute_loss()
 
-    assert loss_value == pytest.approx(expected_loss.item())
+    assert loss_value is not None
+    assert loss_value.item() == pytest.approx(expected_loss.item())
