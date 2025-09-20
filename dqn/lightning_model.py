@@ -80,10 +80,17 @@ class DQNLightning(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         action = self.agent.select_action(self.train_state)
         next_state, reward, done, _ = self.train_env.step(action.item())
-        
+
         self.episode_reward += reward
 
-        self.agent.memory.push(self.train_state, action, torch.tensor([reward], device=self.device), next_state, done)
+        memory_next_state = None if done else next_state
+        self.agent.memory.push(
+            self.train_state,
+            action,
+            torch.tensor([reward], device=self.device),
+            memory_next_state,
+            done,
+        )
 
         self.train_state = next_state
         if done:
