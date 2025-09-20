@@ -206,7 +206,7 @@ class DQNLightning(pl.LightningModule):
             self._train_episode_steps += 1
             ious.append(info.get("iou", 0.0))
 
-            reward_tensor = torch.tensor([reward], device=self.device)
+            reward_tensor = torch.tensor([reward], device=self.device, dtype=torch.float32)
             memory_next_state = None if done else next_state
             self.agent.push_experience(self.train_state, action, reward_tensor, memory_next_state, done)
             self.train_state = next_state
@@ -225,15 +225,15 @@ class DQNLightning(pl.LightningModule):
                 break
 
         episode_time = time.perf_counter() - episode_start
-        mean_loss = torch.stack(losses).mean() if losses else torch.tensor(0.0, device=self.device)
+        mean_loss = torch.stack(losses).mean() if losses else torch.tensor(0.0, device=self.device, dtype=torch.float32)
         mean_iou = sum(ious) / max(1, len(ious))
         step_time = episode_time / max(1, self._train_episode_steps)
 
-        reward_tensor = torch.tensor(self._train_episode_reward, device=self.device)
+        reward_tensor = torch.tensor(self._train_episode_reward, device=self.device, dtype=torch.float32)
         length_tensor = torch.tensor(self._train_episode_steps, device=self.device, dtype=torch.float32)
-        mean_iou_tensor = torch.tensor(mean_iou, device=self.device)
-        epsilon_tensor = torch.tensor(self.agent.current_epsilon, device=self.device)
-        step_time_tensor = torch.tensor(step_time, device=self.device)
+        mean_iou_tensor = torch.tensor(mean_iou, device=self.device, dtype=torch.float32)
+        epsilon_tensor = torch.tensor(self.agent.current_epsilon, device=self.device, dtype=torch.float32)
+        step_time_tensor = torch.tensor(step_time, device=self.device, dtype=torch.float32)
 
         self.log("train/episode_reward", reward_tensor, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("train/episode_length", length_tensor, on_epoch=True, sync_dist=True)
@@ -259,7 +259,7 @@ class DQNLightning(pl.LightningModule):
         else:
             optimizer = optimizers
         current_lr = optimizer.param_groups[0]["lr"]
-        self.log("train/lr", torch.tensor(current_lr, device=self.device), on_epoch=True, prog_bar=False, sync_dist=True)
+        self.log("train/lr", torch.tensor(current_lr, device=self.device, dtype=torch.float32), on_epoch=True, prog_bar=False, sync_dist=True)
 
     # ------------------------------------------------------------------
     # Validation
@@ -291,10 +291,10 @@ class DQNLightning(pl.LightningModule):
         episode_time = time.perf_counter() - start_time
         mean_iou = sum(ious) / max(1, len(ious))
         metrics = {
-            "val/avg_reward": torch.tensor(episode_reward, device=self.device),
-            "val/episode_length": torch.tensor(steps, device=self.device),
-            "val/mean_iou": torch.tensor(mean_iou, device=self.device),
-            "val/step_time_sec": torch.tensor(episode_time / max(1, steps), device=self.device),
+            "val/avg_reward": torch.tensor(episode_reward, device=self.device, dtype=torch.float32),
+            "val/episode_length": torch.tensor(steps, device=self.device, dtype=torch.float32),
+            "val/mean_iou": torch.tensor(mean_iou, device=self.device, dtype=torch.float32),
+            "val/step_time_sec": torch.tensor(episode_time / max(1, steps), device=self.device, dtype=torch.float32),
         }
         for name, value in metrics.items():
             self.log(name, value, on_step=False, on_epoch=True, prog_bar=name == "val/avg_reward", sync_dist=True)
@@ -341,9 +341,9 @@ class DQNLightning(pl.LightningModule):
 
         mean_iou = sum(ious) / max(1, len(ious))
         metrics = {
-            "test/avg_reward": torch.tensor(episode_reward, device=self.device),
-            "test/episode_length": torch.tensor(steps, device=self.device),
-            "test/mean_iou": torch.tensor(mean_iou, device=self.device),
+            "test/avg_reward": torch.tensor(episode_reward, device=self.device, dtype=torch.float32),
+            "test/episode_length": torch.tensor(steps, device=self.device, dtype=torch.float32),
+            "test/mean_iou": torch.tensor(mean_iou, device=self.device, dtype=torch.float32),
         }
         for name, value in metrics.items():
             self.log(name, value, on_step=False, on_epoch=True, prog_bar=name == "test/avg_reward", sync_dist=True)
