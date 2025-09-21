@@ -17,6 +17,8 @@ class TumorLocalizationEnv:
         step_size: float = 10.0,
         scale_factor: float = 1.1,
         min_bbox_size: float = 10.0,
+        initial_mode: str = "full_image",
+        initial_margin: float = 8.0,
     ) -> None:
         self.max_steps = max(1, int(max_steps))
         self.iou_threshold = float(iou_threshold)
@@ -24,6 +26,12 @@ class TumorLocalizationEnv:
         self.step_size = float(step_size)
         self.scale_factor = float(scale_factor)
         self.min_bbox_size = float(min_bbox_size)
+        self.initial_mode = initial_mode
+        if self.initial_mode not in {"full_image", "gt_margin"}:
+            raise ValueError("initial_mode must be either 'full_image' or 'gt_margin'.")
+        self.initial_margin = float(initial_margin)
+        if self.initial_margin < 0.0:
+            raise ValueError("initial_margin must be non-negative.")
 
         self.images: Optional[torch.Tensor] = None
         self.masks: Optional[torch.Tensor] = None
@@ -55,7 +63,7 @@ class TumorLocalizationEnv:
         width = images.size(-1)
 
         self.gt_bboxes, self.has_tumor = self._get_bbox_from_mask(self.masks)
-        self.current_bboxes = self._initialise_bboxes(batch_size, height, width)
+        self.current_bboxes = self._initialise_bboxes(height, width)
         self.last_iou = self._calculate_iou(self.current_bboxes, self.gt_bboxes)
         self.current_step = torch.zeros(batch_size, device=self.device, dtype=torch.long)
         self.active_mask = torch.ones(batch_size, device=self.device, dtype=torch.bool)
@@ -143,27 +151,97 @@ class TumorLocalizationEnv:
         resized_images = F.interpolate(self.images, size=self.resize_shape, mode="bilinear", align_corners=False)
         return resized_images.detach(), self.current_bboxes.detach()
 
-    def _initialise_bboxes(self, batch_size: int, height: int, width: int) -> torch.Tensor:
+    def _initialise_bboxes(self, height: int, width: int) -> torch.Tensor:
+        if self.gt_bboxes is None or self.has_tumor is None:
+            raise RuntimeError("Ground-truth bounding boxes must be computed before initialising.")
+
+        batch_size = self.gt_bboxes.size(0)
         if batch_size <= 0:
             raise ValueError("Batch size must be a positive integer when initialising bounding boxes.")
 
-        widths = torch.full(
-            (batch_size,),
-            float(width),
-            device=self.device,
-            dtype=torch.float32,
-        )
-        heights = torch.full(
-            (batch_size,),
-            float(height),
-            device=self.device,
-            dtype=torch.float32,
-        )
+        if self.initial_mode == "full_image":
+            widths = torch.full(
+                (batch_size,),
+                float(width),
+                device=self.device,
+                dtype=torch.float32,
+            )
+            heights = torch.full(
+                (batch_size,),
+                float(height),
+                device=self.device,
+                dtype=torch.float32,
+            )
 
-        xs = torch.zeros(batch_size, device=self.device, dtype=torch.float32)
-        ys = torch.zeros_like(xs)
+            xs = torch.zeros(batch_size, device=self.device, dtype=torch.float32)
+            ys = torch.zeros_like(xs)
 
-        return torch.stack((xs, ys, widths, heights), dim=1)
+            return torch.stack((xs, ys, widths, heights), dim=1)
+
+        boxes = torch.zeros(batch_size, 4, device=self.device, dtype=torch.float32)
+        width_limit = float(width)
+        height_limit = float(height)
+
+        for index in range(batch_size):
+            if not self.has_tumor[index]:
+                boxes[index] = torch.tensor(
+                    [0.0, 0.0, width_limit, height_limit],
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+                continue
+
+            gt_x, gt_y, gt_w, gt_h = self.gt_bboxes[index].detach().cpu().tolist()
+            start_x, end_x = self._expand_interval(gt_x, gt_w, width_limit)
+            start_y, end_y = self._expand_interval(gt_y, gt_h, height_limit)
+
+            width_val = max(end_x - start_x, self.min_bbox_size)
+            height_val = max(end_y - start_y, self.min_bbox_size)
+
+            end_x = min(start_x + width_val, width_limit)
+            end_y = min(start_y + height_val, height_limit)
+            start_x = max(end_x - width_val, 0.0)
+            start_y = max(end_y - height_val, 0.0)
+
+            boxes[index] = torch.tensor(
+                [start_x, start_y, end_x - start_x, end_y - start_y],
+                device=self.device,
+                dtype=torch.float32,
+            )
+
+        return boxes
+
+    def _expand_interval(self, start: float, length: float, limit: float) -> Tuple[float, float]:
+        margin = self.initial_margin
+        expanded_start = max(start - margin, 0.0)
+        expanded_end = min(start + length + margin, limit)
+
+        # Ensure the interval still contains the tumour entirely.
+        expanded_start = min(expanded_start, start)
+        expanded_end = max(expanded_end, start + length)
+        expanded_start = max(expanded_start, 0.0)
+        expanded_end = min(expanded_end, limit)
+
+        # If expansion reached the borders but there is room inside the image, shift to
+        # create some slack so that immediate moves can have an effect.
+        available_left = expanded_start
+        available_right = limit - expanded_end
+        extra_left = start - expanded_start
+        extra_right = expanded_end - (start + length)
+
+        if expanded_start <= 0.0 and available_right > 0.0:
+            shift = min(self.step_size, available_right, extra_left)
+            if shift > 0.0:
+                expanded_start += shift
+                expanded_end = min(expanded_end + shift, limit)
+
+        if expanded_end >= limit and available_left > 0.0:
+            shift = min(self.step_size, available_left, extra_right)
+            if shift > 0.0:
+                expanded_start = max(expanded_start - shift, 0.0)
+                expanded_end -= shift
+
+        return expanded_start, expanded_end
 
     def _calculate_iou(self, boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
         if boxes1.size() != boxes2.size():
