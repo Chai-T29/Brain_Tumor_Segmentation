@@ -75,6 +75,10 @@ MU-Glioma-Post/
 -   **Image Files:** Should contain `_brain_t1c.nii.gz` in their filename.
 -   **Mask Files:** Should contain `_tumorMask.nii.gz` in their filename.
 
+You can control whether tumour-free slices are included in the training data via the `include_empty_masks` flag in `config.yaml`.
+Enabling this option keeps slices whose masks sum to zero so that the reinforcement learning agent observes a mix of positive and
+negative cases during experience replay.
+
 ## Usage
 
 ### DQN Training
