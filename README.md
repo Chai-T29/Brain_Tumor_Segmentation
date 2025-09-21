@@ -14,11 +14,18 @@ This project focuses on localizing brain tumors in MRI scans using a Deep Q-Netw
 -   **Custom Environment:** Features a custom Gym-like environment (`TumorLocalizationEnv`) where the agent interacts with MRI slices.
     -   **State:** Comprises the 2D MRI slice and the current bounding box coordinates.
     -   **Action Space:** Allows the agent to move the bounding box (up, down, left, right), resize it (expand/shrink horizontally, expand/shrink vertically), or stop.
-    -   **Reward System:** Rewards are based on the Intersection over Union (IoU) with the ground-truth tumor mask, with additional bonuses for achieving high overlap and penalties for stopping prematurely or at incorrect locations.
+    -   **Slice-aware Ground Truth:** Ground-truth bounding boxes are computed directly from each 2D tumor mask, ensuring that no bounding box is produced when a slice is tumor-free and preventing false positives inherited from neighbouring slices.
+    -   **Reward System:** The reward signal follows modern localization research practices—scaled IoU improvement encourages precise refinement, decisive stopping on tumor-free slices is rewarded, and terminal decisions are strongly reinforced or penalized depending on whether the IoU exceeds the success threshold.
 -   **Replay Memory:** Incorporates a replay memory for experience storage and sampling, crucial for stable DQN training.
 -   **PyTorch Lightning Integration:** The DQN agent and its training loop are encapsulated within a `LightningModule` for organized and efficient training.
 -   **Checkpointing:** Automatically saves model checkpoints based on validation loss, allowing for easy resumption of training or evaluation of the best-performing models.
 -   **Visualization:** Generates GIF visualizations of the agent's localization process during testing, showing the bounding box adjustments over time.
+
+### Reward Shaping Strategy
+
+-   **IoU-driven Refinement:** Each active step is rewarded in proportion to the improvement in IoU (scaled by a factor of 2) so that the agent focuses on steady, high-quality localization progress.
+-   **Tumor-aware Termination:** Stopping on a tumor-free slice yields a strong positive reward, while continuing to act accrues a mild penalty to encourage quick rejection of negatives.
+-   **Precision Stopping:** When a tumor is present, the agent receives a large terminal reward for stopping once the IoU surpasses the success threshold and is penalized for stopping early, reinforcing state-of-the-art localization practices that prioritise confident, high-overlap detections.
 
 ## Installation
 

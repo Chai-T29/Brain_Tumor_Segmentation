@@ -32,6 +32,7 @@ class TumorLocalizationEnv:
         self.last_iou: Optional[torch.Tensor] = None
         self.current_step: Optional[torch.Tensor] = None
         self.active_mask: Optional[torch.Tensor] = None
+        self.has_tumor: Optional[torch.Tensor] = None
 
     @property
     def device(self) -> torch.device:
@@ -53,7 +54,7 @@ class TumorLocalizationEnv:
         height = images.size(-2)
         width = images.size(-1)
 
-        self.gt_bboxes = self._get_bbox_from_mask(self.masks)
+        self.gt_bboxes, self.has_tumor = self._get_bbox_from_mask(self.masks)
         self.current_bboxes = self._initialise_bboxes(batch_size, height, width)
         self.last_iou = self._calculate_iou(self.current_bboxes, self.gt_bboxes)
         self.current_step = torch.zeros(batch_size, device=self.device, dtype=torch.long)
@@ -79,14 +80,8 @@ class TumorLocalizationEnv:
         self.current_bboxes = self._apply_action(actions, prev_active)
 
         current_iou = self._calculate_iou(self.current_bboxes, self.gt_bboxes)
-        rewards = torch.where(prev_active, current_iou - self.last_iou, torch.zeros_like(current_iou))
-
-        stop_mask = (actions == self._STOP_ACTION) & prev_active
-        success_mask = (current_iou > self.iou_threshold) & prev_active
+        rewards, stop_mask, success_mask = self._compute_rewards(actions, prev_active, current_iou)
         timeout_mask = (self.current_step >= self.max_steps) & prev_active
-
-        rewards = rewards + torch.where(stop_mask, torch.where(success_mask, torch.ones_like(rewards), -torch.ones_like(rewards)), torch.zeros_like(rewards))
-        rewards = rewards + torch.where(success_mask & ~stop_mask, torch.ones_like(rewards), torch.zeros_like(rewards))
 
         done = stop_mask | success_mask | timeout_mask
         self.active_mask = prev_active & ~done
@@ -245,22 +240,66 @@ class TumorLocalizationEnv:
         
         return torch.stack((x, y, w, h), dim=1)
 
-    def _get_bbox_from_mask(self, masks: torch.Tensor) -> torch.Tensor:
+    def _compute_rewards(
+        self,
+        actions: torch.Tensor,
+        prev_active: torch.Tensor,
+        current_iou: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.last_iou is None:
+            raise RuntimeError("Environment must be reset before computing rewards.")
+        if self.has_tumor is None:
+            raise RuntimeError("Ground-truth tumor presence information missing.")
+
+        delta_iou = torch.where(prev_active, current_iou - self.last_iou, torch.zeros_like(current_iou))
+        rewards = delta_iou * 2.0
+
+        stop_mask = (actions == self._STOP_ACTION) & prev_active
+        tumor_present = self.has_tumor & prev_active
+        no_tumor = (~self.has_tumor) & prev_active
+
+        success_mask = (current_iou >= self.iou_threshold) & tumor_present
+
+        rewards = rewards + torch.where(stop_mask & no_tumor, torch.full_like(rewards, 2.0), torch.zeros_like(rewards))
+        rewards = rewards + torch.where(stop_mask & success_mask, torch.full_like(rewards, 3.0), torch.zeros_like(rewards))
+        rewards = rewards + torch.where(stop_mask & tumor_present & ~success_mask, -torch.full_like(rewards, 2.5), torch.zeros_like(rewards))
+
+        rewards = rewards + torch.where((~stop_mask) & no_tumor, -torch.full_like(rewards, 0.5), torch.zeros_like(rewards))
+        rewards = rewards + torch.where((~stop_mask) & success_mask, -torch.full_like(rewards, 0.5), torch.zeros_like(rewards))
+
+        rewards = torch.where(prev_active, rewards, torch.zeros_like(rewards))
+
+        return rewards, stop_mask, success_mask
+
+    def _get_bbox_from_mask(self, masks: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         batch_size = masks.size(0)
         boxes = torch.zeros(batch_size, 4, device=self.device, dtype=torch.float32)
+        has_tumor = torch.zeros(batch_size, device=self.device, dtype=torch.bool)
+
         mask_binary = masks > 0
+        if mask_binary.dim() != 4:
+            raise ValueError("Masks must be 4D tensors with shape [B, C, H, W].")
+
+        per_slice_mask = mask_binary.any(dim=1)
+
         for index in range(batch_size):
-            coords = torch.nonzero(mask_binary[index], as_tuple=False)
+            coords = torch.nonzero(per_slice_mask[index], as_tuple=False)
             if coords.numel() == 0:
                 continue
+
             ys = coords[:, -2].float()
             xs = coords[:, -1].float()
-            x_min = xs.min()
-            x_max = xs.max()
+
             y_min = ys.min()
             y_max = ys.max()
+            x_min = xs.min()
+            x_max = xs.max()
+
             width = torch.clamp(x_max - x_min + 1.0, min=self.min_bbox_size)
             height = torch.clamp(y_max - y_min + 1.0, min=self.min_bbox_size)
+
             boxes[index] = torch.tensor([x_min, y_min, width, height], device=self.device, dtype=torch.float32)
-        return boxes
+            has_tumor[index] = True
+
+        return boxes, has_tumor
 
