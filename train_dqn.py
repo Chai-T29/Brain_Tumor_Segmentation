@@ -54,9 +54,11 @@ def main():
         iou_threshold=env_cfg.get("iou_threshold", 0.8),
     )
 
+    logger_version = logging_cfg.get("version")
     logger = TensorBoardLogger(
         save_dir=logging_cfg.get("log_dir", "lightning_logs"),
         name=logging_cfg.get("logger_name", "dqn_agent"),
+        version=logger_version,
     )
 
     checkpoint_subdir = Path(logging_cfg.get("checkpoint_dir", "checkpoints")).name
