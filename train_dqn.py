@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import yaml
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
@@ -52,9 +54,17 @@ def main():
         iou_threshold=env_cfg.get("iou_threshold", 0.8),
     )
 
+    logger = TensorBoardLogger(
+        save_dir=logging_cfg.get("log_dir", "lightning_logs"),
+        name=logging_cfg.get("logger_name", "dqn_agent"),
+    )
+
+    checkpoint_subdir = Path(logging_cfg.get("checkpoint_dir", "checkpoints")).name
+    checkpoint_dir = Path(logger.log_dir) / checkpoint_subdir
+
     checkpoint_callback = ModelCheckpoint(
         monitor="val/avg_reward",
-        dirpath=logging_cfg.get("checkpoint_dir", "lightning_logs/checkpoints"),
+        dirpath=str(checkpoint_dir),
         filename="dqn-epoch{epoch:02d}-reward{val_avg_reward:.2f}",
         save_top_k=3,
         mode="max",
@@ -66,11 +76,6 @@ def main():
         patience=logging_cfg.get("early_stopping_patience", 20),
         mode="max",
         verbose=True,
-    )
-
-    logger = TensorBoardLogger(
-        save_dir=logging_cfg.get("log_dir", "lightning_logs"),
-        name=logging_cfg.get("logger_name", "dqn_agent"),
     )
 
     trainer = pl.Trainer(
