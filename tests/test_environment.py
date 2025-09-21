@@ -10,6 +10,35 @@ def _no_tumor_batch(batch_size=1):
     return images, masks
 
 
+def test_initial_bbox_covers_full_image():
+    env = TumorLocalizationEnv()
+    height, width = 128, 96
+    batch_size = 3
+    images = torch.zeros(batch_size, 3, height, width)
+    masks = torch.zeros(batch_size, 1, height, width)
+
+    _, bboxes = env.reset(images, masks)
+
+    expected_xy = torch.zeros(batch_size, 2, dtype=torch.float32)
+    expected_wh = torch.tensor([[width, height]] * batch_size, dtype=torch.float32)
+
+    assert torch.allclose(bboxes[:, :2], expected_xy)
+    assert torch.allclose(bboxes[:, 2:], expected_wh)
+
+
+def test_initial_bbox_overlaps_tumor_mask():
+    env = TumorLocalizationEnv()
+    images = torch.zeros(1, 3, 84, 84)
+    masks = torch.zeros(1, 1, 84, 84)
+    masks[:, :, 10:20, 15:25] = 1.0
+
+    env.reset(images, masks)
+
+    assert env.last_iou is not None
+    assert env.last_iou.shape == (1,)
+    assert env.last_iou.item() > 0.0
+
+
 def test_no_tumor_stop_action_reward():
     env = TumorLocalizationEnv(max_steps=5, iou_threshold=0.5)
     images, masks = _no_tumor_batch()
