@@ -31,6 +31,7 @@ def main():
         val_split=data_cfg.get("val_split", 0.1),
         test_split=data_cfg.get("test_split", 0.1),
         seed=training_cfg.get("seed", 42),
+        include_empty_masks=data_cfg.get("include_empty_masks", False),
     )
 
     model = DQNLightning(

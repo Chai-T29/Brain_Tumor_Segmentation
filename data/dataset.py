@@ -7,15 +7,19 @@ import numpy as np
 class BrainTumorDataset(Dataset):
     """Brain Tumor Segmentation Dataset for .nii.gz files."""
 
-    def __init__(self, data_dir, transform=None):
+    def __init__(self, data_dir, transform=None, include_empty_masks: bool = False):
         """
         Args:
             data_dir (string): Directory with all the patient folders.
             transform (callable, optional): Optional transform to be applied
                 on a sample.
+            include_empty_masks (bool): Whether to keep slices where the mask
+                sums to zero. Defaults to ``False`` which filters out tumour-
+                free slices.
         """
         self.data_dir = data_dir
         self.transform = transform
+        self.include_empty_masks = bool(include_empty_masks)
         self.samples = []
 
         for patient_dir in sorted(os.listdir(data_dir)):
@@ -39,7 +43,8 @@ class BrainTumorDataset(Dataset):
                     mask_nii = nib.load(mask_path)
                     mask_data = mask_nii.get_fdata()
                     for i in range(mask_data.shape[2]):
-                        if np.sum(mask_data[:, :, i]) > 0: # Only include slices with a tumor
+                        has_tumor = np.sum(mask_data[:, :, i]) > 0
+                        if has_tumor or self.include_empty_masks:
                             self.samples.append((image_path, mask_path, i))
 
 

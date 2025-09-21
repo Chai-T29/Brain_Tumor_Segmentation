@@ -20,6 +20,7 @@ class BrainTumorDataModule(pl.LightningDataModule):
         val_split: float = 0.1,
         test_split: float = 0.1,
         seed: int = 42,
+        include_empty_masks: bool = False,
     ) -> None:
         super().__init__()
         self.data_dir = data_dir
@@ -31,6 +32,7 @@ class BrainTumorDataModule(pl.LightningDataModule):
         self.test_split = max(0.0, float(test_split))
         self.seed = seed
         self.transform = None  # Add your transforms here if needed
+        self.include_empty_masks = bool(include_empty_masks)
 
         self.train_dataset = None
         self.val_dataset = None
@@ -40,7 +42,11 @@ class BrainTumorDataModule(pl.LightningDataModule):
         if stage not in (None, "fit", "validate", "test"):
             return
 
-        dataset = BrainTumorDataset(self.data_dir, transform=self.transform)
+        dataset = BrainTumorDataset(
+            self.data_dir,
+            transform=self.transform,
+            include_empty_masks=self.include_empty_masks,
+        )
         total_samples = len(dataset)
         if total_samples == 0:
             raise RuntimeError("BrainTumorDataset is empty. Please verify the dataset path and contents.")

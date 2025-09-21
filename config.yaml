@@ -6,6 +6,7 @@ data:
   pin_memory: true
   val_split: 0.1
   test_split: 0.1
+  include_empty_masks: false
 
 training:
   batch_size: 16
