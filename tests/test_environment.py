@@ -10,20 +10,35 @@ def _no_tumor_batch(batch_size=1):
     return images, masks
 
 
-def test_initial_bbox_covers_full_image():
-    env = TumorLocalizationEnv()
+def test_initial_bbox_covers_resized_frame():
+    resize_shape = (84, 84)
+    env = TumorLocalizationEnv(resize_shape=resize_shape)
     height, width = 128, 96
     batch_size = 3
     images = torch.zeros(batch_size, 3, height, width)
     masks = torch.zeros(batch_size, 1, height, width)
 
-    _, bboxes = env.reset(images, masks)
+    (resized_images, bboxes) = env.reset(images, masks)
 
     expected_xy = torch.zeros(batch_size, 2, dtype=torch.float32)
-    expected_wh = torch.tensor([[width, height]] * batch_size, dtype=torch.float32)
+    expected_wh = torch.tensor([list(resize_shape[::-1])] * batch_size, dtype=torch.float32)
 
+    assert resized_images.shape[-2:] == resize_shape
     assert torch.allclose(bboxes[:, :2], expected_xy)
     assert torch.allclose(bboxes[:, 2:], expected_wh)
+
+
+def test_bbox_scaling_with_non_square_resize():
+    resize_shape = (100, 150)
+    env = TumorLocalizationEnv(resize_shape=resize_shape)
+    height, width = 200, 300
+    images = torch.zeros(1, 3, height, width)
+    masks = torch.zeros(1, 1, height, width)
+
+    (_, bboxes) = env.reset(images, masks)
+
+    expected = torch.tensor([[0.0, 0.0, resize_shape[1], resize_shape[0]]], dtype=torch.float32)
+    assert torch.allclose(bboxes, expected)
 
 
 def test_initial_bbox_overlaps_tumor_mask():

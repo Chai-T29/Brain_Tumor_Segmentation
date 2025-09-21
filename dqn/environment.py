@@ -37,10 +37,15 @@ class TumorLocalizationEnv:
         self.masks: Optional[torch.Tensor] = None
         self.gt_bboxes: Optional[torch.Tensor] = None
         self.current_bboxes: Optional[torch.Tensor] = None
+        self.current_bboxes_unscaled: Optional[torch.Tensor] = None
         self.last_iou: Optional[torch.Tensor] = None
         self.current_step: Optional[torch.Tensor] = None
         self.active_mask: Optional[torch.Tensor] = None
         self.has_tumor: Optional[torch.Tensor] = None
+        self._original_height: Optional[float] = None
+        self._original_width: Optional[float] = None
+        self._scale_x: Optional[float] = None
+        self._scale_y: Optional[float] = None
 
     @property
     def device(self) -> torch.device:
@@ -62,9 +67,25 @@ class TumorLocalizationEnv:
         height = images.size(-2)
         width = images.size(-1)
 
+        # Compute ground-truth bounding boxes and tumor presence
         self.gt_bboxes, self.has_tumor = self._get_bbox_from_mask(self.masks)
-        self.current_bboxes = self._initialise_bboxes(height, width)
-        self.last_iou = self._calculate_iou(self.current_bboxes, self.gt_bboxes)
+
+        # Save original size and compute scaling factors
+        self._original_height = float(height)
+        self._original_width = float(width)
+        self._scale_y = self.resize_shape[0] / self._original_height
+        self._scale_x = self.resize_shape[1] / self._original_width
+
+        # Initialise unscaled bounding boxes with chosen mode
+        self.current_bboxes_unscaled = self._initialise_bboxes(height, width)
+
+        # Scale to resized coordinate system for state representation
+        self.current_bboxes = self._scale_bboxes_to_resize(self.current_bboxes_unscaled)
+
+        # IoU is computed w.r.t unscaled GT boxes
+        self.last_iou = self._calculate_iou(self.current_bboxes_unscaled, self.gt_bboxes)
+
+        # Step and activity tracking
         self.current_step = torch.zeros(batch_size, device=self.device, dtype=torch.long)
         self.active_mask = torch.ones(batch_size, device=self.device, dtype=torch.bool)
 
@@ -85,9 +106,9 @@ class TumorLocalizationEnv:
         actions = torch.where(prev_active, actions, torch.full_like(actions, self._STOP_ACTION))
 
         self.current_step = self.current_step + prev_active.long()
-        self.current_bboxes = self._apply_action(actions, prev_active)
+        self.current_bboxes_unscaled, self.current_bboxes = self._apply_action(actions, prev_active)
 
-        current_iou = self._calculate_iou(self.current_bboxes, self.gt_bboxes)
+        current_iou = self._calculate_iou(self.current_bboxes_unscaled, self.gt_bboxes)
         rewards, stop_mask, success_mask = self._compute_rewards(actions, prev_active, current_iou)
         timeout_mask = (self.current_step >= self.max_steps) & prev_active
 
@@ -104,7 +125,11 @@ class TumorLocalizationEnv:
         import matplotlib.patches as patches
         import numpy as np
 
-        if self.images is None or self.current_bboxes is None or self.gt_bboxes is None:
+        if (
+            self.images is None
+            or self.current_bboxes_unscaled is None
+            or self.gt_bboxes is None
+        ):
             raise RuntimeError("Environment must be reset before rendering.")
         if not 0 <= index < self.images.size(0):
             raise IndexError("Render index out of range for current batch.")
@@ -120,7 +145,9 @@ class TumorLocalizationEnv:
         ax.imshow(image_np, cmap="gray")
 
         gt_x, gt_y, gt_w, gt_h = self.gt_bboxes[index].detach().cpu().tolist()
-        agent_x, agent_y, agent_w, agent_h = self.current_bboxes[index].detach().cpu().tolist()
+        agent_x, agent_y, agent_w, agent_h = (
+            self.current_bboxes_unscaled[index].detach().cpu().tolist()
+        )
 
         gt_rect = patches.Rectangle((gt_x, gt_y), gt_w, gt_h, linewidth=2, edgecolor="g", facecolor="none", label="Ground Truth")
         agent_rect = patches.Rectangle((agent_x, agent_y), agent_w, agent_h, linewidth=2, edgecolor="r", facecolor="none", label="Agent")
@@ -243,6 +270,18 @@ class TumorLocalizationEnv:
 
         return expanded_start, expanded_end
 
+    def _scale_bboxes_to_resize(self, boxes: torch.Tensor) -> torch.Tensor:
+        if self._scale_x is None or self._scale_y is None:
+            raise RuntimeError("Scale factors are not initialised.")
+
+        x, y, w, h = boxes.unbind(dim=1)
+        scaled_x = x * self._scale_x
+        scaled_y = y * self._scale_y
+        scaled_w = w * self._scale_x
+        scaled_h = h * self._scale_y
+
+        return torch.stack((scaled_x, scaled_y, scaled_w, scaled_h), dim=1)
+
     def _calculate_iou(self, boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
         if boxes1.size() != boxes2.size():
             raise ValueError("Boxes must have the same shape for IoU calculation.")
@@ -266,11 +305,16 @@ class TumorLocalizationEnv:
         iou = torch.where(union > 0, inter_area / union, torch.zeros_like(union))
         return iou
 
-    def _apply_action(self, actions: torch.Tensor, active_mask: torch.Tensor) -> torch.Tensor:
-        if self.current_bboxes is None or self.images is None:
+    def _apply_action(
+        self, actions: torch.Tensor, active_mask: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.current_bboxes_unscaled is None or self.images is None:
             raise RuntimeError("Environment must be reset before applying actions.")
 
-        x, y, w, h = self.current_bboxes.unbind(dim=1)
+        if self._scale_x is None or self._scale_y is None:
+            raise RuntimeError("Scale factors are not initialised.")
+
+        x, y, w, h = self.current_bboxes_unscaled.unbind(dim=1)
         width_limit = torch.tensor(self.images.size(-1), device=self.device, dtype=torch.float32)
         height_limit = torch.tensor(self.images.size(-2), device=self.device, dtype=torch.float32)
 
@@ -319,8 +363,10 @@ class TumorLocalizationEnv:
 
         x = torch.clamp(x, min=zero_x, max=max_x)
         y = torch.clamp(y, min=zero_y, max=max_y)
-        
-        return torch.stack((x, y, w, h), dim=1)
+
+        updated_unscaled = torch.stack((x, y, w, h), dim=1)
+        updated_scaled = self._scale_bboxes_to_resize(updated_unscaled)
+        return updated_unscaled, updated_scaled
 
     def _compute_rewards(
         self,
