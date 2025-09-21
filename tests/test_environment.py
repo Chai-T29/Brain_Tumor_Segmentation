@@ -74,3 +74,17 @@ def test_no_tumor_continue_action_penalty():
 
     assert rewards.item() == pytest.approx(-0.5)
     assert not done.item()
+
+
+def test_gt_margin_initialisation_allows_movement():
+    env = TumorLocalizationEnv(initial_mode="gt_margin", initial_margin=5.0, step_size=5.0)
+    images = torch.zeros(1, 3, 84, 84)
+    masks = torch.zeros(1, 1, 84, 84)
+    masks[:, :, 30:40, 30:40] = 1.0
+
+    _, bboxes = env.reset(images, masks)
+    initial_bbox = bboxes.clone()
+
+    (_, updated_bboxes), _, _, _ = env.step(torch.tensor([3]))
+
+    assert updated_bboxes[0, 0] > initial_bbox[0, 0]
