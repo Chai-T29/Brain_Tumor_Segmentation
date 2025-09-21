@@ -144,20 +144,24 @@ class TumorLocalizationEnv:
         return resized_images.detach(), self.current_bboxes.detach()
 
     def _initialise_bboxes(self, batch_size: int, height: int, width: int) -> torch.Tensor:
-        min_w = max(1, width // 4)
-        max_w = max(min_w + 1, width // 2)
-        min_h = max(1, height // 4)
-        max_h = max(min_h + 1, height // 2)
+        widths = torch.full(
+            (batch_size,),
+            float(width),
+            device=self.device,
+            dtype=torch.float32,
+        )
+        heights = torch.full(
+            (batch_size,),
+            float(height),
+            device=self.device,
+            dtype=torch.float32,
+        )
 
-        widths = torch.randint(min_w, max_w, (batch_size,), device=self.device, dtype=torch.long).to(torch.float32)
-        heights = torch.randint(min_h, max_h, (batch_size,), device=self.device, dtype=torch.long).to(torch.float32)
         widths = torch.clamp(widths, min=self.min_bbox_size, max=float(width))
         heights = torch.clamp(heights, min=self.min_bbox_size, max=float(height))
 
-        max_x = torch.clamp(torch.tensor(width, device=self.device, dtype=torch.float32) - widths, min=0.0)
-        max_y = torch.clamp(torch.tensor(height, device=self.device, dtype=torch.float32) - heights, min=0.0)
-        xs = torch.rand(batch_size, device=self.device) * max_x
-        ys = torch.rand(batch_size, device=self.device) * max_y
+        xs = torch.zeros(batch_size, device=self.device, dtype=torch.float32)
+        ys = torch.zeros(batch_size, device=self.device, dtype=torch.float32)
 
         return torch.stack((xs, ys, widths, heights), dim=1)
 

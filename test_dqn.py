@@ -1,7 +1,5 @@
-import glob
-import os
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Iterable
 
 import imageio
 import torch
@@ -17,13 +15,38 @@ def load_config(path: str) -> Dict:
         return yaml.safe_load(config_file)
 
 
-def find_best_checkpoint(checkpoint_dir: str) -> str | None:
-    checkpoints = glob.glob(os.path.join(checkpoint_dir, "*.ckpt"))
-    if not checkpoints:
-        return None
+def _sorted_checkpoint_paths(directory: Path) -> list[Path]:
+    if not directory.exists():
+        return []
 
-    checkpoints.sort(key=os.path.getmtime, reverse=True)
-    return checkpoints[0]
+    checkpoints = sorted(directory.glob("*.ckpt"), key=lambda path: path.stat().st_mtime, reverse=True)
+    return checkpoints
+
+
+def find_best_checkpoint(
+    log_dir: Path,
+    logger_name: str,
+    checkpoint_subdir: str,
+    versions: Iterable[Path] | None = None,
+) -> Path | None:
+    logger_root = log_dir / logger_name
+
+    if versions is None:
+        candidate_versions = sorted(
+            (path for path in logger_root.glob("version_*") if path.is_dir()),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    else:
+        candidate_versions = [path for path in versions if path.is_dir()]
+
+    for version_dir in candidate_versions:
+        checkpoint_dir = version_dir / checkpoint_subdir
+        checkpoints = _sorted_checkpoint_paths(checkpoint_dir)
+        if checkpoints:
+            return checkpoints[0]
+
+    return None
 
 
 def main():
@@ -33,15 +56,30 @@ def main():
     env_cfg = config.get("environment", {})
     logging_cfg = config.get("logging", {})
 
-    checkpoint_dir = logging_cfg.get("checkpoint_dir", "lightning_logs/checkpoints")
-    best_checkpoint_path = find_best_checkpoint(checkpoint_dir)
+    log_dir = Path(logging_cfg.get("log_dir", "lightning_logs"))
+    logger_name = logging_cfg.get("logger_name", "dqn_agent")
+    checkpoint_subdir = Path(logging_cfg.get("checkpoint_dir", "checkpoints")).name
+
+    requested_version = logging_cfg.get("version")
+    versions = None
+    if requested_version is not None:
+        version_dir = log_dir / logger_name / f"version_{requested_version}"
+        versions = [version_dir]
+
+    best_checkpoint_path = find_best_checkpoint(log_dir, logger_name, checkpoint_subdir, versions=versions)
+
+    if best_checkpoint_path is None:
+        fallback_dir = Path(logging_cfg.get("checkpoint_dir", "checkpoints"))
+        checkpoints = _sorted_checkpoint_paths(fallback_dir)
+        if checkpoints:
+            best_checkpoint_path = checkpoints[0]
 
     if not best_checkpoint_path:
         print("No checkpoints found. Please train a model first.")
         return
 
     print(f"Loading model from: {best_checkpoint_path}")
-    model = DQNLightning.load_from_checkpoint(best_checkpoint_path)
+    model = DQNLightning.load_from_checkpoint(str(best_checkpoint_path))
     model.eval()
     model.to(torch.device("cpu"))
 

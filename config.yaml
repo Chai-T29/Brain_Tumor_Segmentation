@@ -29,7 +29,7 @@ environment:
 logging:
   log_dir: "lightning_logs"
   logger_name: "dqn_agent"
-  checkpoint_dir: "lightning_logs/checkpoints"
+  checkpoint_dir: "checkpoints"
   test_gif_limit: 10
   test_gif_dir: "lightning_logs/test_gifs"
   test_gif_fps: 4
