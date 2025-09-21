@@ -82,16 +82,16 @@ MU-Glioma-Post/
 To train the Deep Q-Network agent for tumor localization:
 
 ```bash
-python -m dqn.train_dqn
+python train_dqn.py
 ```
-You can adjust hyperparameters like `MAX_EPOCHS` (number of episodes), `BATCH_SIZE`, `LEARNING_RATE`, etc., in `dqn/train_dqn.py`.
+You can adjust hyperparameters like `max_epochs`, `batch_size`, `learning_rate`, etc., in `config.yaml` or by modifying `train_dqn.py`.
 
 ### DQN Testing and Visualization
 
 To test the trained DQN agent and generate a GIF visualization of its performance:
 
 ```bash
-python -m dqn.test_dqn
+python test_dqn.py
 ```
 This script will automatically find the best-performing checkpoint based on validation loss and save a GIF named `dqn_test_episode.gif` in the project root, showcasing the agent's bounding box adjustments on a randomly selected validation image.
 
@@ -106,9 +106,9 @@ Brain_Tumor_Segmentation/
 │   ├── environment.py         # Custom Gym-like environment for tumor localization
 │   ├── lightning_model.py     # PyTorch Lightning module for DQN training
 │   ├── model.py               # Q-Network architecture for DQN
-│   ├── replay_memory.py       # Replay memory for DQN experience storage
-│   └── train_dqn.py           # Script to train the DQN agent
-│   └── test_dqn.py            # Script to test the DQN agent and generate video
+│   └── replay_memory.py       # Replay memory for DQN experience storage
+├── train_dqn.py               # Script to train the DQN agent
+├── test_dqn.py                # Script to test the DQN agent and generate video
 ├── lightning_logs/            # Directory for PyTorch Lightning logs and checkpoints
 ├── MU-Glioma-Post/            # Directory for your dataset (as described above)
 ├── README.md                  # This file
