@@ -35,7 +35,7 @@ def main():
     )
 
     model = DQNLightning(
-        batch_size=training_cfg.get("batch_size", data_cfg.get("batch_size", 16)),
+        batch_size=data_cfg.get("batch_size", 16),
         lr=training_cfg.get("lr", 1e-4),
         gamma=training_cfg.get("gamma", 0.99),
         eps_start=training_cfg.get("eps_start", 1.0),
