@@ -16,7 +16,6 @@ class DQNLightning(pl.LightningModule):
 
     def __init__(
         self,
-        data_dir: str,
         batch_size: int = 16,
         lr: float = 1e-4,
         gamma: float = 0.99,
@@ -28,7 +27,6 @@ class DQNLightning(pl.LightningModule):
         max_steps: int = 100,
         grad_clip: float = 1.0,
         lr_gamma: float = 0.995,
-        seed: int = 42,
         val_interval: int = 1,
         test_gif_limit: int = 10,
         test_gif_dir: str = "lightning_logs/test_gifs",
@@ -48,7 +46,6 @@ class DQNLightning(pl.LightningModule):
             policy_net=self.policy_net,
             target_net=self.target_net,
             num_actions=9,
-            learning_rate=self.hparams.lr,
             gamma=self.hparams.gamma,
             epsilon_start=self.hparams.eps_start,
             epsilon_end=self.hparams.eps_end,
@@ -218,7 +215,6 @@ class DQNLightning(pl.LightningModule):
         batch: Dict[str, torch.Tensor],
         greedy: bool,
         record: bool,
-        record_index: int = 0,
     ) -> Tuple[Dict[str, torch.Tensor], Optional[list]]:
         images = batch["image"].to(self.device, non_blocking=True)
         masks = batch["mask"].to(self.device, non_blocking=True)
@@ -232,7 +228,7 @@ class DQNLightning(pl.LightningModule):
         frames = []
 
         if record:
-            frames.append(env.render(index=record_index, mode="rgb_array"))
+            frames.append(env.render(index=0, mode="rgb_array"))
 
         for _ in range(self.hparams.max_steps):
             actions = self.agent.select_action(state, greedy=greedy)
@@ -246,7 +242,7 @@ class DQNLightning(pl.LightningModule):
             state = next_state
 
             if record:
-                frames.append(env.render(index=record_index, mode="rgb_array"))
+                frames.append(env.render(index=0, mode="rgb_array"))
 
             active_mask = active_mask & ~done.to(self.device)
             if not active_mask.any():

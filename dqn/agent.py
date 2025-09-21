@@ -14,7 +14,6 @@ class DQNAgent:
         policy_net,
         target_net,
         num_actions,
-        learning_rate: float = 1e-4,
         gamma: float = 0.99,
         epsilon_start: float = 1.0,
         epsilon_end: float = 0.05,
@@ -24,7 +23,6 @@ class DQNAgent:
         target_update: int = 10,
     ) -> None:
         self.num_actions = num_actions
-        self.learning_rate = learning_rate
         self.gamma = gamma
         self.epsilon_start = epsilon_start
         self.epsilon_end = epsilon_end
@@ -36,7 +34,6 @@ class DQNAgent:
         self.target_net = target_net
 
         self.memory = ReplayMemory(memory_size)
-        self.steps_done = 0
         self.current_epsilon = max(0.0, epsilon_start)
         if self.epsilon_start <= 0:
             self._step_decay = 1.0
@@ -47,9 +44,6 @@ class DQNAgent:
     @property
     def device(self) -> torch.device:
         return next(self.policy_net.parameters()).device
-
-    def reset_memory(self) -> None:
-        self.memory = ReplayMemory(self.memory.capacity)
 
     def set_episode_progress(self, episode_idx: int, total_episodes: Optional[int]) -> None:
         """Update epsilon-greedy exploration schedule for a new episode."""
@@ -86,7 +80,6 @@ class DQNAgent:
         random_actions = torch.randint(0, self.num_actions, (batch_size,), device=self.device)
         selected_actions = torch.where(random_mask, random_actions, greedy_actions)
 
-        self.steps_done += batch_size
         self.current_epsilon = max(self.epsilon_end, self.current_epsilon * self._step_decay)
         return selected_actions.detach()
 

@@ -51,97 +51,45 @@ class BrainTumorDataModule(pl.LightningDataModule):
         if total_samples == 0:
             raise RuntimeError("BrainTumorDataset is empty. Please verify the dataset path and contents.")
 
-        base_train = 1
-        base_val = 1 if self.val_split > 0 else 0
-        base_test = 1 if self.test_split > 0 else 0
-        remaining = total_samples - (base_train + base_val + base_test)
-
-        val_ratio = self.val_split
-        test_ratio = self.test_split
+        val_ratio = max(0.0, float(self.val_split))
+        test_ratio = max(0.0, float(self.test_split))
         train_ratio = max(0.0, 1.0 - val_ratio - test_ratio)
+
         ratio_sum = train_ratio + val_ratio + test_ratio
-        if ratio_sum <= 0:
+        if ratio_sum == 0:
+            train_ratio = 1.0
             ratio_sum = 1.0
+
         train_ratio /= ratio_sum
         val_ratio /= ratio_sum
         test_ratio /= ratio_sum
 
-        extra_train = int(round(remaining * train_ratio))
-        extra_val = int(round(remaining * val_ratio))
-        extra_test = remaining - extra_train - extra_val
+        ratios = [train_ratio, val_ratio, test_ratio]
+        lengths = [int(r * total_samples) for r in ratios]
+        remainder = total_samples - sum(lengths)
 
-        train_size = base_train + max(0, extra_train)
-        val_size = base_val + max(0, extra_val)
-        test_size = base_test + max(0, extra_test)
+        if remainder > 0:
+            order = sorted(range(len(ratios)), key=lambda idx: ratios[idx], reverse=True)
+            for idx in order:
+                if remainder == 0:
+                    break
+                lengths[idx] += 1
+                remainder -= 1
 
-        while train_size + val_size + test_size < total_samples:
-            train_size += 1
-
-        while train_size + val_size + test_size > total_samples:
-            if train_size > base_train:
-                train_size -= 1
-            elif val_size > base_val:
-                val_size -= 1
-            elif test_size > base_test:
-                test_size -= 1
-            else:
-                break
-
-        if test_size < 1 and self.test_split > 0:
-            test_size = 1
-            if train_size > base_train:
-                train_size -= 1
-            elif val_size > base_val:
-                val_size = max(0, val_size - 1)
-
-        if val_size < 1 and self.val_split > 0:
-            val_size = 1
-            if train_size > base_train:
-                train_size -= 1
-            elif test_size > base_test:
-                test_size = max(0, test_size - 1)
-
-        total_assigned = train_size + val_size + test_size
-        if total_assigned != total_samples:
-            diff = total_samples - total_assigned
-            train_size = max(1, train_size + diff)
-
-        if test_size < 0:
-            test_size = 0
-
-        remaining_for_test = total_samples - train_size - val_size
-        if remaining_for_test < 0:
-            train_size = max(1, train_size + remaining_for_test)
-            remaining_for_test = total_samples - train_size - val_size
-        test_size = max(0, remaining_for_test)
+        if lengths[0] == 0 and total_samples > 0:
+            largest_idx = max(range(len(lengths)), key=lambda idx: lengths[idx])
+            if lengths[largest_idx] > 0:
+                lengths[largest_idx] -= 1
+                lengths[0] += 1
 
         generator = torch.Generator().manual_seed(self.seed)
-        if val_size > 0 and test_size > 0:
-            remaining = total_samples - train_size - val_size
-            if remaining < 1:
-                adjust = 1 - remaining
-                if train_size > base_train:
-                    train_size = max(base_train, train_size - adjust)
-                val_size = min(val_size, total_samples - train_size - 1)
-                remaining = max(1, total_samples - train_size - val_size)
-            splits = [train_size, val_size, remaining]
-            self.train_dataset, self.val_dataset, self.test_dataset = random_split(
-                dataset, splits, generator=generator
-            )
-        elif val_size > 0:
-            remaining = max(1, total_samples - train_size)
-            splits = [train_size, remaining]
-            self.train_dataset, self.val_dataset = random_split(dataset, splits, generator=generator)
+        subsets = list(random_split(dataset, lengths, generator=generator))
+
+        self.train_dataset, self.val_dataset, self.test_dataset = subsets
+        if lengths[1] == 0:
+            self.val_dataset = self.train_dataset
+        if lengths[2] == 0:
             self.test_dataset = self.val_dataset
-        elif test_size > 0:
-            remaining = max(1, total_samples - train_size)
-            splits = [train_size, remaining]
-            self.train_dataset, self.test_dataset = random_split(dataset, splits, generator=generator)
-            self.val_dataset = self.test_dataset
-        else:
-            self.train_dataset = dataset
-            self.val_dataset = dataset
-            self.test_dataset = dataset
 
     def _dataloader(self, dataset, shuffle: bool = False) -> DataLoader:
         if dataset is None:

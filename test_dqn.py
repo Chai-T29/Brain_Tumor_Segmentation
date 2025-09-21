@@ -118,8 +118,6 @@ def main():
         total_reward += float(rewards[0].item())
         state = next_state
 
-    env.close()
-
     output_dir = Path(logging_cfg.get("test_gif_dir", "lightning_logs/test_gifs"))
     output_dir.mkdir(parents=True, exist_ok=True)
     video_path = output_dir / "dqn_test_episode.gif"

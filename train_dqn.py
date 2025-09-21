@@ -35,7 +35,6 @@ def main():
     )
 
     model = DQNLightning(
-        data_dir=data_cfg.get("data_dir", "MU-Glioma-Post/"),
         batch_size=training_cfg.get("batch_size", data_cfg.get("batch_size", 16)),
         lr=training_cfg.get("lr", 1e-4),
         gamma=training_cfg.get("gamma", 0.99),
@@ -47,7 +46,6 @@ def main():
         max_steps=training_cfg.get("max_steps", 100),
         grad_clip=training_cfg.get("grad_clip", 1.0),
         lr_gamma=training_cfg.get("lr_gamma", 0.995),
-        seed=training_cfg.get("seed", 42),
         val_interval=training_cfg.get("val_interval", 1),
         test_gif_limit=logging_cfg.get("test_gif_limit", 10),
         test_gif_dir=logging_cfg.get("test_gif_dir", "lightning_logs/test_gifs"),
