@@ -143,53 +143,7 @@ class DuelingQNetwork(nn.Module):
         q_values = value + (advantage - advantage.mean(dim=1, keepdim=True))
         return q_values
 
-
-class NoisyDuelingQNetwork(nn.Module):
-    """Dueling Q-Network variant that uses NoisyNet linear layers."""
-
-    def __init__(self, num_actions: int = 9) -> None:
-        super().__init__()
-
-        self.conv1 = nn.Conv2d(3, 32, kernel_size=8, stride=4)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
-        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
-
-        self.fc_bbox = nn.Linear(4, 128)
-        self.fc1 = nn.Linear(3136 + 128, 512)
-
-        self.value_stream = nn.Sequential(
-            NoisyLinear(512, 256),
-            nn.ReLU(),
-            NoisyLinear(256, 1),
-        )
-
-        self.advantage_stream = nn.Sequential(
-            NoisyLinear(512, 256),
-            nn.ReLU(),
-            NoisyLinear(256, num_actions),
-        )
-
-    def forward(self, image: torch.Tensor, bbox: torch.Tensor) -> torch.Tensor:
-        x = F.relu(self.conv1(image))
-        x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x))
-        x = x.view(x.size(0), -1)
-
-        y = F.relu(self.fc_bbox(bbox))
-        z = torch.cat((x, y), dim=1)
-        z = F.relu(self.fc1(z))
-
-        value = self.value_stream(z)
-        advantage = self.advantage_stream(z)
-        q_values = value + (advantage - advantage.mean(dim=1, keepdim=True))
-        return q_values
-
-    def reset_noise(self) -> None:
-        for module in self.modules():
-            if isinstance(module, NoisyLinear):
-                module.reset_noise()
-
-class DuelingQNetwork(nn.Module):
+class DuelingQNetworkHF(nn.Module):
     """Dueling Q-Network with Hugging Face pretrained backbone (frozen)."""
 
     def __init__(self, num_actions=9, model_name="microsoft/resnet18"):
@@ -259,3 +213,48 @@ class DuelingQNetwork(nn.Module):
 
         q_values = value + (advantage - advantage.mean(dim=1, keepdim=True))
         return q_values
+ 
+class NoisyDuelingQNetwork(nn.Module):
+    """Dueling Q-Network variant that uses NoisyNet linear layers."""
+
+    def __init__(self, num_actions: int = 9) -> None:
+        super().__init__()
+
+        self.conv1 = nn.Conv2d(3, 32, kernel_size=8, stride=4)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
+        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
+
+        self.fc_bbox = nn.Linear(4, 128)
+        self.fc1 = nn.Linear(3136 + 128, 512)
+
+        self.value_stream = nn.Sequential(
+            NoisyLinear(512, 256),
+            nn.ReLU(),
+            NoisyLinear(256, 1),
+        )
+
+        self.advantage_stream = nn.Sequential(
+            NoisyLinear(512, 256),
+            nn.ReLU(),
+            NoisyLinear(256, num_actions),
+        )
+
+    def forward(self, image: torch.Tensor, bbox: torch.Tensor) -> torch.Tensor:
+        x = F.relu(self.conv1(image))
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
+        x = x.view(x.size(0), -1)
+
+        y = F.relu(self.fc_bbox(bbox))
+        z = torch.cat((x, y), dim=1)
+        z = F.relu(self.fc1(z))
+
+        value = self.value_stream(z)
+        advantage = self.advantage_stream(z)
+        q_values = value + (advantage - advantage.mean(dim=1, keepdim=True))
+        return q_values
+
+    def reset_noise(self) -> None:
+        for module in self.modules():
+            if isinstance(module, NoisyLinear):
+                module.reset_noise()
