@@ -1,9 +1,10 @@
-from typing import Iterable, Optional
+from collections import defaultdict, deque
+from typing import Dict, Iterable, Optional
 
 import torch
 import torch.nn.functional as F
 
-from dqn.replay_memory import Experience, ReplayMemory
+from dqn.replay_memory import Experience, PrioritizedReplayMemory
 
 
 class DQNAgent:
@@ -33,9 +34,13 @@ class DQNAgent:
         self.policy_net = policy_net
         self.target_net = target_net
 
-        self.memory = ReplayMemory(memory_size)
+        self.memory = PrioritizedReplayMemory(memory_size)
         self.current_epsilon = max(0.0, epsilon_start)
         self.global_step = 0
+        self.n_step = 3
+        self.n_step_buffers: Dict[int, deque] = defaultdict(lambda: deque(maxlen=self.n_step))
+        self.beta = 0.4
+        self.beta_increment_per_sampling = (1.0 - self.beta) / 100000
         # if self.epsilon_start <= 0:
         #     self._step_decay = 1.0
         # else:
@@ -54,8 +59,22 @@ class DQNAgent:
             progress = min(max(episode_idx, 0), total_episodes - 1) / (total_episodes - 1)
         self.current_epsilon = self.epsilon_start - progress * (self.epsilon_start - self.epsilon_end)
 
-    def push_experience(self, state, action, reward, next_state, done) -> None:
-        self.memory.push(state, action, reward, next_state, done)
+    def push_experience(self, state, action, reward, next_state, done, env_idx: int) -> None:
+        buffer = self.n_step_buffers[env_idx]
+        buffer.append((state, action, reward, next_state, done))
+
+        if done:
+            while buffer:
+                transition = list(buffer)
+                aggregated = self._aggregate_n_step(transition)
+                self.memory.push(*aggregated)
+                buffer.popleft()
+            buffer.clear()
+        elif len(buffer) == self.n_step:
+            transition = list(buffer)
+            aggregated = self._aggregate_n_step(transition)
+            self.memory.push(*aggregated)
+            buffer.popleft()
 
     def select_action(self, state, greedy: bool = False) -> torch.Tensor:
         """Selects actions for a batch of states using an epsilon-greedy policy."""
@@ -93,8 +112,10 @@ class DQNAgent:
         if len(self.memory) < self.batch_size:
             return None
 
-        experiences = self.memory.sample(self.batch_size)
+        experiences, indices, weights = self.memory.sample(self.batch_size, beta=self.beta)
+        self.beta = min(1.0, self.beta + self.beta_increment_per_sampling)
         batch = Experience(*zip(*experiences))
+        weights = weights.to(self.device)
 
         state_batch = batch.state
         action_batch = torch.cat(batch.action).to(self.device)
@@ -144,8 +165,28 @@ class DQNAgent:
             next_state_values[non_final_mask] = q_next_chosen
 
         expected_state_action_values = (next_state_values * self.gamma) + reward_batch
-        loss = F.smooth_l1_loss(state_action_values, expected_state_action_values.unsqueeze(1))
+        td_target = expected_state_action_values.unsqueeze(1)
+        loss_elements = F.smooth_l1_loss(state_action_values, td_target, reduction="none")
+        loss = (loss_elements * weights.view(-1, 1)).mean()
+
+        td_errors = (td_target - state_action_values).detach().squeeze(1).abs().cpu().numpy() + 1e-6
+        self.memory.update_priorities(indices, td_errors)
         return loss
+
+    def _aggregate_n_step(self, transitions):
+        state, action, _, _, _ = transitions[0]
+        cumulative_reward = torch.zeros_like(transitions[0][2])
+        next_state = transitions[-1][3]
+        done = transitions[-1][4]
+
+        for idx, (_, _, reward, step_next_state, step_done) in enumerate(transitions):
+            cumulative_reward += (self.gamma ** idx) * reward
+            if step_done:
+                next_state = None
+                done = True
+                break
+
+        return state, action, cumulative_reward, next_state, done
 
     def update_target_net(self) -> None:
         """Updates the target network with the policy network's weights."""

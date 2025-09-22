@@ -1,7 +1,60 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoImageProcessor, AutoModel
+
+
+class NoisyLinear(nn.Module):
+    """Factorised Gaussian noisy linear layer as described in NoisyNet-DQN."""
+
+    def __init__(self, in_features: int, out_features: int, sigma_init: float = 0.5) -> None:
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+
+        self.weight_mu = nn.Parameter(torch.empty(out_features, in_features))
+        self.weight_sigma = nn.Parameter(torch.empty(out_features, in_features))
+        self.register_buffer("weight_epsilon", torch.empty(out_features, in_features))
+
+        self.bias_mu = nn.Parameter(torch.empty(out_features))
+        self.bias_sigma = nn.Parameter(torch.empty(out_features))
+        self.register_buffer("bias_epsilon", torch.empty(out_features))
+
+        self.sigma_init = sigma_init
+        self.reset_parameters()
+        self.reset_noise()
+
+    def reset_parameters(self) -> None:
+        mu_range = 1.0 / math.sqrt(self.in_features)
+        self.weight_mu.data.uniform_(-mu_range, mu_range)
+        self.bias_mu.data.uniform_(-mu_range, mu_range)
+
+        sigma_weight = self.sigma_init / math.sqrt(self.in_features)
+        sigma_bias = self.sigma_init / math.sqrt(self.out_features)
+        self.weight_sigma.data.fill_(sigma_weight)
+        self.bias_sigma.data.fill_(sigma_bias)
+
+    def reset_noise(self) -> None:
+        epsilon_in = self._scale_noise(self.in_features)
+        epsilon_out = self._scale_noise(self.out_features)
+        self.weight_epsilon.copy_(epsilon_out.ger(epsilon_in))
+        self.bias_epsilon.copy_(epsilon_out)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.training:
+            weight = self.weight_mu + self.weight_sigma * self.weight_epsilon
+            bias = self.bias_mu + self.bias_sigma * self.bias_epsilon
+        else:
+            weight = self.weight_mu
+            bias = self.bias_mu
+        return F.linear(x, weight, bias)
+
+    @staticmethod
+    def _scale_noise(size: int) -> torch.Tensor:
+        x = torch.randn(size)
+        return x.sign().mul_(x.abs().sqrt_())
 
 class QNetwork(nn.Module):
     """Q-Network for the DQN Agent."""
@@ -160,3 +213,48 @@ class DuelingQNetworkHF(nn.Module):
 
         q_values = value + (advantage - advantage.mean(dim=1, keepdim=True))
         return q_values
+ 
+class NoisyDuelingQNetwork(nn.Module):
+    """Dueling Q-Network variant that uses NoisyNet linear layers."""
+
+    def __init__(self, num_actions: int = 9) -> None:
+        super().__init__()
+
+        self.conv1 = nn.Conv2d(3, 32, kernel_size=8, stride=4)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
+        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
+
+        self.fc_bbox = nn.Linear(4, 128)
+        self.fc1 = nn.Linear(3136 + 128, 512)
+
+        self.value_stream = nn.Sequential(
+            NoisyLinear(512, 256),
+            nn.ReLU(),
+            NoisyLinear(256, 1),
+        )
+
+        self.advantage_stream = nn.Sequential(
+            NoisyLinear(512, 256),
+            nn.ReLU(),
+            NoisyLinear(256, num_actions),
+        )
+
+    def forward(self, image: torch.Tensor, bbox: torch.Tensor) -> torch.Tensor:
+        x = F.relu(self.conv1(image))
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
+        x = x.view(x.size(0), -1)
+
+        y = F.relu(self.fc_bbox(bbox))
+        z = torch.cat((x, y), dim=1)
+        z = F.relu(self.fc1(z))
+
+        value = self.value_stream(z)
+        advantage = self.advantage_stream(z)
+        q_values = value + (advantage - advantage.mean(dim=1, keepdim=True))
+        return q_values
+
+    def reset_noise(self) -> None:
+        for module in self.modules():
+            if isinstance(module, NoisyLinear):
+                module.reset_noise()
