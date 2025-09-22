@@ -115,6 +115,7 @@ class DQNLightning(pl.LightningModule):
                     reward_sample,
                     next_state_sample,
                     bool(done[idx].item()),
+                    env_idx=idx,
                 )
 
             loss = self.agent.compute_loss()
