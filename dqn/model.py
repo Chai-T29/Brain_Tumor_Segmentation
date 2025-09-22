@@ -90,7 +90,7 @@ class DuelingQNetwork(nn.Module):
         q_values = value + (advantage - advantage.mean(dim=1, keepdim=True))
         return q_values
 
-class DuelingQNetwork(nn.Module):
+class DuelingQNetworkHF(nn.Module):
     """Dueling Q-Network with Hugging Face pretrained backbone (frozen)."""
 
     def __init__(self, num_actions=9, model_name="microsoft/resnet18"):
