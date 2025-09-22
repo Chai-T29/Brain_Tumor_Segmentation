@@ -89,7 +89,7 @@ class DQNLightning(pl.LightningModule):
         action_counts = torch.zeros(self.agent.num_actions, device=self.device)
 
         for _ in range(self.hparams.max_steps):
-            actions = self.agent.select_action(state)
+            actions = self.agent.select_action(state, self.train_env)
             next_state, rewards, done, info = self.train_env.step(actions)
 
             action_counts += torch.bincount(
@@ -242,7 +242,7 @@ class DQNLightning(pl.LightningModule):
             frames.append(env.render(index=0, mode="rgb_array"))
 
         for _ in range(self.hparams.max_steps):
-            actions = self.agent.select_action(state, greedy=greedy)
+            actions = self.agent.select_action(state, env, greedy=greedy)
             next_state, rewards, done, info = env.step(actions)
 
             action_counts += torch.bincount(

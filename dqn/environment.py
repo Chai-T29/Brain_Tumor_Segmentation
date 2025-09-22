@@ -530,4 +530,29 @@ class TumorLocalizationEnv:
             has_tumor[index] = True
 
         return boxes, has_tumor
+    
+    def _get_positive_actions(self, index: int) -> list[int]:
+        """
+        Return the list of actions that improve IoU for the environment at batch index.
+        """
+        if self.images is None or self.gt_bboxes is None:
+            raise RuntimeError("Environment must be reset before querying positive actions.")
 
+        positive_actions = []
+        current_box = self.current_bboxes_unscaled[index].unsqueeze(0)  # shape (1,4)
+        current_iou = self.last_iou[index].unsqueeze(0)
+        gt_box = self.gt_bboxes[index].unsqueeze(0)
+
+        for action in range(self._STOP_ACTION + 1):  # loop over all actions
+            # simulate this action
+            test_actions = torch.tensor([action], device=self.device)
+            test_active = torch.tensor([True], device=self.device)
+            new_unscaled, _ = self._apply_action(test_actions, test_active)
+
+            # compute IoU
+            new_iou = self._calculate_iou(new_unscaled, gt_box)
+
+            if new_iou.item() > current_iou.item():
+                positive_actions.append(action)
+
+        return positive_actions

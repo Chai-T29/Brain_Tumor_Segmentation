@@ -12,19 +12,19 @@ training:
   lr: 0.001
   gamma: 0.98
   eps_start: 1.0
-  eps_end: 0.05
-  eps_decay: 300000
+  eps_end: 0.02
+  eps_decay: 500000
   memory_size: 150000
   target_update: 1000
   max_steps: 50
-  grad_clip: 1.0
+  grad_clip: 7.0
   lr_gamma: 0.95
   seed: 42
   val_interval: 1
   max_epochs: 50
 
 environment:
-  iou_threshold: 0.75
+  iou_threshold: 0.8
 
 logging:
   log_dir: "lightning_logs"

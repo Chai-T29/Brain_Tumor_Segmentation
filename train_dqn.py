@@ -94,8 +94,11 @@ def main():
         deterministic=True,
     )
     #torch.set_float32_matmul_precision('medium')
-    trainer.fit(model, datamodule=data_module)
-    trainer.validate(model, datamodule=data_module, ckpt_path="best")
+    try:
+        trainer.fit(model, datamodule=data_module)
+    except Exception as e:
+        print(e)
+
     trainer.test(model, datamodule=data_module, ckpt_path="best")
 
 

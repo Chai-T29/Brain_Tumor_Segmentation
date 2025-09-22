@@ -1,5 +1,6 @@
 from collections import defaultdict, deque
 from typing import Dict, Iterable, Optional
+import random
 
 import torch
 import torch.nn.functional as F
@@ -76,7 +77,7 @@ class DQNAgent:
             self.memory.push(*aggregated)
             buffer.popleft()
 
-    def select_action(self, state, greedy: bool = False) -> torch.Tensor:
+    def select_action(self, state, env, greedy: bool = False) -> torch.Tensor:
         """Selects actions for a batch of states using an epsilon-greedy policy."""
         image, bbox = state
         if image.dim() == 3:
@@ -94,11 +95,30 @@ class DQNAgent:
 
         if greedy:
             return greedy_actions.detach()
+        
+        # 
+        selected_actions = []
+        for i in range(batch_size):
+            if torch.rand(1).item() < self.current_epsilon:
+                # guided exploration
+                positive_actions = env._get_positive_actions(i)
+                if positive_actions:
+                    action = torch.tensor(
+                        random.choice(positive_actions),
+                        device=self.device
+                    )
+                else:
+                    # fallback: uniform random
+                    action = torch.randint(0, self.num_actions, (1,), device=self.device)
+            else:
+                action = greedy_actions[i]
+            selected_actions.append(action)
 
-        epsilon = self.current_epsilon
-        random_mask = torch.rand(batch_size, device=self.device) < epsilon
-        random_actions = torch.randint(0, self.num_actions, (batch_size,), device=self.device)
-        selected_actions = torch.where(random_mask, random_actions, greedy_actions)
+        selected_actions = torch.stack(selected_actions)
+        # Old methodology
+        # random_mask = torch.rand(batch_size, device=self.device) < self.current_epsilon
+        # random_actions = torch.randint(0, self.num_actions, (batch_size,), device=self.device)
+        # selected_actions = torch.where(random_mask, random_actions, greedy_actions)
 
         #self.current_epsilon = max(self.epsilon_end, self.current_epsilon * self._step_decay)
         self.global_step += 1
