@@ -1,7 +1,7 @@
 data:
   data_dir: "MU-Glioma-Post/"
   batch_size: 64
-  num_workers: 4
+  num_workers: 8
   persistent_workers: true
   pin_memory: false
   val_split: 0.1
@@ -9,7 +9,7 @@ data:
   include_empty_masks: false
 
 training:
-  lr: 0.0001
+  lr: 0.001
   gamma: 0.98
   eps_start: 1.0
   eps_end: 0.05
