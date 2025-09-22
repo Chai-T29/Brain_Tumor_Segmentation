@@ -86,10 +86,15 @@ class DQNLightning(pl.LightningModule):
         iou_values = []
         losses = []
         active_mask = torch.ones(batch_size, dtype=torch.bool, device=self.device)
+        action_counts = torch.zeros(self.agent.num_actions, device=self.device)
 
         for _ in range(self.hparams.max_steps):
             actions = self.agent.select_action(state)
             next_state, rewards, done, info = self.train_env.step(actions)
+
+            action_counts += torch.bincount(
+                actions, minlength=self.agent.num_actions
+            ).to(self.device, dtype=action_counts.dtype)
 
             rewards_device = rewards.to(self.device)
             cumulative_rewards += rewards_device
@@ -144,6 +149,9 @@ class DQNLightning(pl.LightningModule):
 
         epsilon_tensor = torch.tensor(self.agent.current_epsilon, device=self.device)
         step_time_tensor = torch.tensor(step_time, device=self.device)
+        total_actions = action_counts.sum()
+        if total_actions > 0:
+            action_counts = action_counts / total_actions
 
         self.log("train/episode_reward", avg_reward, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("train/episode_length", avg_length, on_epoch=True, sync_dist=True)
@@ -151,6 +159,7 @@ class DQNLightning(pl.LightningModule):
         self.log("train/mean_iou", mean_iou, on_epoch=True, sync_dist=True)
         self.log("train/epsilon", epsilon_tensor, on_epoch=True, sync_dist=True)
         self.log("train/step_time_sec", step_time_tensor, on_epoch=True, sync_dist=True)
+        self.log("train/action_counts", action_counts, on_epoch=True, sync_dist=True)
 
         return mean_loss
 
@@ -227,6 +236,7 @@ class DQNLightning(pl.LightningModule):
         iou_values = []
         active_mask = torch.ones(batch_size, dtype=torch.bool, device=self.device)
         frames = []
+        action_counts = torch.zeros(self.agent.num_actions, device=self.device)
 
         if record:
             frames.append(env.render(index=0, mode="rgb_array"))
@@ -234,6 +244,10 @@ class DQNLightning(pl.LightningModule):
         for _ in range(self.hparams.max_steps):
             actions = self.agent.select_action(state, greedy=greedy)
             next_state, rewards, done, info = env.step(actions)
+
+            action_counts += torch.bincount(
+                actions, minlength=self.agent.num_actions
+            ).to(self.device, dtype=action_counts.dtype)
 
             rewards_device = rewards.to(self.device)
             cumulative_rewards += rewards_device
@@ -253,6 +267,7 @@ class DQNLightning(pl.LightningModule):
             "avg_reward": cumulative_rewards.mean(),
             "episode_length": steps_taken.mean(),
             "mean_iou": torch.cat(iou_values).mean() if iou_values else torch.tensor(0.0, device=self.device),
+            "action_counts": action_counts / action_counts.sum().clamp_min(1.0),
         }
         return metrics, frames if record else None
 
