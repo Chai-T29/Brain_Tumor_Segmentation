@@ -7,7 +7,7 @@ from dqn.replay_memory import Experience, ReplayMemory
 
 
 class DQNAgent:
-    """The DQN Agent that interacts with and learns from the environment."""
+    """The DQN (or DDQN) Agent that interacts with and learns from the environment."""
 
     def __init__(
         self,
@@ -115,13 +115,32 @@ class DQNAgent:
 
         non_final_mask = torch.tensor(non_final_mask_list, device=self.device, dtype=torch.bool)
 
+        # Standard DQN Setup
+        # next_state_values = torch.zeros(self.batch_size, device=self.device)
+        # if non_final_next_states:
+        #     non_final_next_images = torch.stack([s[0] for s in non_final_next_states]).to(self.device)
+        #     non_final_next_bboxes = torch.stack([s[1] for s in non_final_next_states]).to(self.device)
+        #     next_state_values[non_final_mask] = (
+        #         self.target_net(non_final_next_images, non_final_next_bboxes).max(1)[0].detach()
+        #     )
+
+        # Double-DQN Setup (reduces overestimation bias)
         next_state_values = torch.zeros(self.batch_size, device=self.device)
+        
         if non_final_next_states:
             non_final_next_images = torch.stack([s[0] for s in non_final_next_states]).to(self.device)
             non_final_next_bboxes = torch.stack([s[1] for s in non_final_next_states]).to(self.device)
-            next_state_values[non_final_mask] = (
-                self.target_net(non_final_next_images, non_final_next_bboxes).max(1)[0].detach()
-            )
+
+            with torch.no_grad():
+                # 1) Action selection uses the *policy* network
+                q_next_policy = self.policy_net(non_final_next_images, non_final_next_bboxes)
+                next_actions = q_next_policy.argmax(dim=1, keepdim=True)  # shape (M, 1)
+
+                # 2) Action evaluation uses the *target* network
+                q_next_target = self.target_net(non_final_next_images, non_final_next_bboxes)
+                q_next_chosen = q_next_target.gather(1, next_actions).squeeze(1)  # shape (M,)
+
+            next_state_values[non_final_mask] = q_next_chosen
 
         expected_state_action_values = (next_state_values * self.gamma) + reward_batch
         loss = F.smooth_l1_loss(state_action_values, expected_state_action_values.unsqueeze(1))
