@@ -1,11 +1,24 @@
-from typing import Dict, Optional, Tuple
+from typing import ClassVar, Dict, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
 
 
 class TumorLocalizationEnv:
-    """Vectorized environment for batched tumor localization."""
+    """Vectorized environment for batched tumor localization.
+
+    The environment clips rewards to :data:`REWARD_CLIP_RANGE` to stabilise DQN
+    targets.  Downstream losses should therefore expect shaped rewards in the
+    range specified by the class attribute (``[-6.0, 6.0]`` by default) after all
+    bonuses and penalties are applied.
+    """
+
+    REWARD_CLIP_RANGE: ClassVar[Tuple[float, float]] = (-6.0, 6.0)
+    STOP_REWARD_SUCCESS: ClassVar[float] = 4.0
+    STOP_REWARD_NO_TUMOR: ClassVar[float] = 2.0
+    STOP_REWARD_FALSE: ClassVar[float] = -3.0
+    TIME_PENALTY: ClassVar[float] = 0.01
+    HOLD_PENALTY: ClassVar[float] = 0.5
 
     _STOP_ACTION = 8
 
@@ -400,9 +413,9 @@ class TumorLocalizationEnv:
         success_mask = (current_iou >= self.iou_threshold) & tumor_present
 
         # Rewards/penalties for STOP decisions
-        r_stop_success = 4.0   # correct STOP when IoU >= threshold
-        r_stop_none    = 3.0   # correct STOP when no tumor present
-        r_stop_false   = -3.0  # premature/incorrect STOP when tumor present but IoU < threshold
+        r_stop_success = self.STOP_REWARD_SUCCESS  # correct STOP when IoU >= threshold
+        r_stop_none = self.STOP_REWARD_NO_TUMOR    # correct STOP when no tumor present
+        r_stop_false = self.STOP_REWARD_FALSE      # premature/incorrect STOP when tumor present but IoU < threshold
 
         rewards = rewards + torch.where(stop_mask & success_mask, torch.full_like(rewards, r_stop_success), torch.zeros_like(rewards))
         rewards = rewards + torch.where(stop_mask & no_tumor, torch.full_like(rewards, r_stop_none), torch.zeros_like(rewards))
@@ -410,19 +423,21 @@ class TumorLocalizationEnv:
 
         # --- Non-STOP penalties ---
         # Small universal time penalty: encourages shorter trajectories and decisive moves.
-        time_penalty = 0.01
-        rewards = rewards - torch.where(prev_active & ~stop_mask, torch.full_like(rewards, time_penalty), torch.zeros_like(rewards))
+        time_penalty = self.TIME_PENALTY
+        apply_time_penalty = prev_active & ~stop_mask & ~(no_tumor | success_mask)
+        rewards = rewards - torch.where(apply_time_penalty, torch.full_like(rewards, time_penalty), torch.zeros_like(rewards))
 
         # If agent should STOP (no tumor OR already successful) but keeps moving, add extra penalty.
-        hold_penalty = 0.5
+        hold_penalty = self.HOLD_PENALTY
         rewards = rewards - torch.where((~stop_mask) & no_tumor, torch.full_like(rewards, hold_penalty), torch.zeros_like(rewards))
         rewards = rewards - torch.where((~stop_mask) & success_mask, torch.full_like(rewards, hold_penalty), torch.zeros_like(rewards))
 
         # Only assign rewards on previously-active envs; keep zeros for finished ones.
         rewards = torch.where(prev_active, rewards, torch.zeros_like(rewards))
 
-        # Optional clipping to stabilize DQN targets; adjust if you prefer a wider range.
-        rewards = torch.clamp(rewards, min=-1.0, max=1.0)
+        # Optional clipping to stabilize DQN targets.
+        min_clip, max_clip = self.REWARD_CLIP_RANGE
+        rewards = torch.clamp(rewards, min=min_clip, max=max_clip)
 
         return rewards, stop_mask, success_mask
     

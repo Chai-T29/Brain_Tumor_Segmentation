@@ -3,6 +3,15 @@ from typing import Iterable, List, Sequence
 
 import numpy as np
 
+
+class PrioritizedSample(list):
+    """List-like container that also stores sampling metadata."""
+
+    def __init__(self, experiences, indices, weights):
+        super().__init__(experiences)
+        self.indices = indices
+        self.weights = weights
+
 Experience = namedtuple('Experience',
                         ('state', 'action', 'reward', 'next_state', 'done'))
 
@@ -55,7 +64,7 @@ class PrioritizedReplayMemory:
         weights /= weights.max()
 
         weights_tensor = torch_from_numpy(weights)
-        return experiences, indices, weights_tensor
+        return PrioritizedSample(experiences, indices, weights_tensor)
 
     def update_priorities(self, indices: Sequence[int], priorities: Iterable[float]) -> None:
         for idx, prio in zip(indices, priorities):
