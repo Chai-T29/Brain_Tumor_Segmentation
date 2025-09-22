@@ -2,6 +2,7 @@ from pathlib import Path
 
 import yaml
 import pytorch_lightning as pl
+import torch
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 
@@ -87,11 +88,12 @@ def main():
         check_val_every_n_epoch=model.hparams.val_interval,
         callbacks=[checkpoint_callback, early_stopping],
         logger=logger,
+        #precision='16-mixed',
         log_every_n_steps=1,
         enable_model_summary=True,
         deterministic=True,
     )
-
+    #torch.set_float32_matmul_precision('medium')
     trainer.fit(model, datamodule=data_module)
     trainer.validate(model, datamodule=data_module, ckpt_path="best")
     trainer.test(model, datamodule=data_module, ckpt_path="best")
