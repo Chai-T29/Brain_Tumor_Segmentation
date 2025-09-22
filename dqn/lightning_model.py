@@ -8,7 +8,7 @@ import torch
 
 from dqn.agent import DQNAgent
 from dqn.environment import TumorLocalizationEnv
-from dqn.model import QNetwork
+from dqn.model import QNetwork, DuelingQNetwork, DuelingQNetworkHF
 
 
 class DQNLightning(pl.LightningModule):
@@ -37,8 +37,8 @@ class DQNLightning(pl.LightningModule):
         self.save_hyperparameters()
         self.automatic_optimization = False
 
-        self.policy_net = QNetwork(num_actions=9)
-        self.target_net = QNetwork(num_actions=9)
+        self.policy_net = DuelingQNetwork(num_actions=9)
+        self.target_net = DuelingQNetwork(num_actions=9)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
 

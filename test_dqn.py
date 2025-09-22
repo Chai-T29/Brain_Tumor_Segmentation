@@ -5,6 +5,7 @@ import imageio
 import torch
 import yaml
 
+import pytorch_lightning as pl
 from data.data_module import BrainTumorDataModule
 from dqn.environment import TumorLocalizationEnv
 from dqn.lightning_model import DQNLightning
@@ -80,8 +81,6 @@ def main():
 
     print(f"Loading model from: {best_checkpoint_path}")
     model = DQNLightning.load_from_checkpoint(str(best_checkpoint_path))
-    model.eval()
-    model.to(torch.device("cpu"))
 
     data_module = BrainTumorDataModule(
         data_dir=data_cfg.get("data_dir", "MU-Glioma-Post/"),
@@ -93,39 +92,13 @@ def main():
         test_split=data_cfg.get("test_split", 0.1),
         seed=training_cfg.get("seed", 42),
     )
-    data_module.setup("test")
-
-    val_loader = data_module.val_dataloader()
-    if val_loader is None:
-        print("Validation dataloader is not available.")
-        return
-
-    batch = next(iter(val_loader))
-    images = batch["image"][:1]
-    masks = batch["mask"][:1]
-
-    env = TumorLocalizationEnv(max_steps=model.hparams.max_steps, iou_threshold=env_cfg.get("iou_threshold", 0.8))
-    state = env.reset(images, masks)
-
-    total_reward = 0.0
-    frames = [env.render(index=0, mode="rgb_array")]
-    done = torch.zeros(images.size(0), dtype=torch.bool)
-
-    while not done.all():
-        action = model.agent.select_action(state, greedy=True)
-        next_state, rewards, done, _ = env.step(action)
-        frames.append(env.render(index=0, mode="rgb_array"))
-        total_reward += float(rewards[0].item())
-        state = next_state
-
-    output_dir = Path(logging_cfg.get("test_gif_dir", "lightning_logs/test_gifs"))
-    output_dir.mkdir(parents=True, exist_ok=True)
-    video_path = output_dir / "dqn_test_episode.gif"
-
-    print(f"Test episode finished with a total reward of: {total_reward:.2f}")
-    print(f"Saving video to {video_path}")
-    imageio.mimsave(video_path, frames, fps=logging_cfg.get("test_gif_fps", 4))
-
+    trainer = pl.Trainer(
+        accelerator="auto",
+        devices="auto",
+        strategy="auto",
+        deterministic=True,
+    )
+    trainer.test(model, datamodule=data_module)
 
 if __name__ == "__main__":
     main()

@@ -104,7 +104,7 @@ class DQNAgent:
         self.global_step += 1
         fraction = min(1.0, self.global_step / self.epsilon_decay)
         # exponential decay between start and end
-        self.current_epsilon = self.epsilon_end + (self.epsilon_start - self.epsilon_end) * ( (1 - fraction) ** 3)
+        self.current_epsilon = self.epsilon_end + (self.epsilon_start - self.epsilon_end) * ((1 - fraction) ** 3)
         return selected_actions.detach()
 
     def compute_loss(self) -> Optional[torch.Tensor]:
