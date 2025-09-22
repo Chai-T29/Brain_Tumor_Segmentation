@@ -112,7 +112,10 @@ class DQNAgent:
         if len(self.memory) < self.batch_size:
             return None
 
-        experiences, indices, weights = self.memory.sample(self.batch_size, beta=self.beta)
+        sampled = self.memory.sample(self.batch_size, beta=self.beta)
+        experiences = list(sampled)
+        indices = sampled.indices
+        weights = sampled.weights
         self.beta = min(1.0, self.beta + self.beta_increment_per_sampling)
         batch = Experience(*zip(*experiences))
         weights = weights.to(self.device)
