@@ -1,5 +1,6 @@
 import random
 
+import numpy as np
 import pytest
 import torch
 
@@ -95,7 +96,8 @@ def test_optimize_model_handles_terminal_transition():
     )
 
     random.seed(0)
-    experiences = agent.memory.sample(agent.batch_size)
+    np.random.seed(0)
+    experiences, indices, weights = agent.memory.sample(agent.batch_size)
     expected_loss, expected_targets = _compute_expected_loss(agent, experiences)
 
     # Ensure terminal transitions produce targets equal to their rewards.
@@ -106,6 +108,7 @@ def test_optimize_model_handles_terminal_transition():
             assert expected_targets[idx].item() == pytest.approx(rewards[idx])
 
     random.seed(0)
+    np.random.seed(0)
     loss_value = agent.compute_loss()
 
     assert loss_value is not None

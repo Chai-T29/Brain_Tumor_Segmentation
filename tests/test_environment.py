@@ -61,7 +61,7 @@ def test_no_tumor_stop_action_reward():
 
     _, rewards, done, _ = env.step(torch.tensor([env._STOP_ACTION]))
 
-    assert rewards.item() == pytest.approx(2.0)
+    assert rewards.item() == pytest.approx(1.0)
     assert done.item()
 
 
@@ -72,8 +72,56 @@ def test_no_tumor_continue_action_penalty():
 
     _, rewards, done, _ = env.step(torch.tensor([0]))
 
-    assert rewards.item() == pytest.approx(-0.5)
+    assert rewards.item() == pytest.approx(-0.51, abs=1e-6)
     assert not done.item()
+
+
+def test_threshold_reached_does_not_force_stop():
+    env = TumorLocalizationEnv(max_steps=5, iou_threshold=0.0, step_size=0.0, scale_factor=1.0)
+    images = torch.zeros(1, 3, 84, 84)
+    masks = torch.zeros(1, 1, 84, 84)
+    masks[:, :, 20:30, 20:30] = 1.0
+
+    env.reset(images, masks)
+
+    _, rewards, done, info = env.step(torch.tensor([0]))
+
+    assert not done.item()
+    assert info["success"].item() is False
+    assert rewards.item() > -1.0  # Should not be clipped due to premature hold penalty
+
+
+def test_hold_penalty_only_after_threshold_persist():
+    env = TumorLocalizationEnv(max_steps=5, iou_threshold=0.0, step_size=0.0, scale_factor=1.0)
+    images = torch.zeros(1, 3, 84, 84)
+    masks = torch.zeros(1, 1, 84, 84)
+    masks[:, :, 10:20, 10:20] = 1.0
+
+    env.reset(images, masks)
+
+    _, first_reward, done, _ = env.step(torch.tensor([0]))
+    assert not done.item()
+
+    _, second_reward, done_flag, _ = env.step(torch.tensor([0]))
+    assert not done_flag.item()
+
+    assert second_reward.item() == pytest.approx(first_reward.item() - 0.5, rel=1e-4, abs=1e-4)
+
+
+def test_stop_action_records_success():
+    env = TumorLocalizationEnv(max_steps=5, iou_threshold=0.0, step_size=0.0, scale_factor=1.0)
+    images = torch.zeros(1, 3, 84, 84)
+    masks = torch.zeros(1, 1, 84, 84)
+    masks[:, :, 5:15, 5:15] = 1.0
+
+    env.reset(images, masks)
+
+    env.step(torch.tensor([0]))  # reach threshold without stopping
+    _, reward, done, info = env.step(torch.tensor([env._STOP_ACTION]))
+
+    assert done.item()
+    assert info["success"].item() is True
+    assert reward.item() == pytest.approx(1.0)
 
 
 def test_gt_margin_initialisation_allows_movement():

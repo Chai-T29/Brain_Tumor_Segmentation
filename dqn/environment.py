@@ -55,6 +55,7 @@ class TumorLocalizationEnv:
         self.current_step: Optional[torch.Tensor] = None
         self.active_mask: Optional[torch.Tensor] = None
         self.has_tumor: Optional[torch.Tensor] = None
+        self._threshold_reached: Optional[torch.Tensor] = None
         self._original_height: Optional[float] = None
         self._original_width: Optional[float] = None
         self._scale_x: Optional[float] = None
@@ -101,6 +102,7 @@ class TumorLocalizationEnv:
         # Step and activity tracking
         self.current_step = torch.zeros(batch_size, device=self.device, dtype=torch.long)
         self.active_mask = torch.ones(batch_size, device=self.device, dtype=torch.bool)
+        self._threshold_reached = torch.zeros(batch_size, device=self.device, dtype=torch.bool)
 
         return self._get_state()
 
@@ -118,18 +120,34 @@ class TumorLocalizationEnv:
         prev_active = self.active_mask.clone()
         actions = torch.where(prev_active, actions, torch.full_like(actions, self._STOP_ACTION))
 
+        if self._threshold_reached is None:
+            raise RuntimeError("Threshold tracking not initialised. Call reset before stepping.")
+        prev_threshold_reached = torch.where(
+            prev_active,
+            self._threshold_reached,
+            torch.zeros_like(self._threshold_reached),
+        )
+
         self.current_step = self.current_step + prev_active.long()
+        timeout_mask = (self.current_step >= self.max_steps) & prev_active
         self.current_bboxes_unscaled, self.current_bboxes = self._apply_action(actions, prev_active)
 
         current_iou = self._calculate_iou(self.current_bboxes_unscaled, self.gt_bboxes)
-        rewards, stop_mask, success_mask = self._compute_rewards(actions, prev_active, current_iou)
-        timeout_mask = (self.current_step >= self.max_steps) & prev_active
+        rewards, stop_mask, success_mask, threshold_hit = self._compute_rewards(
+            actions,
+            prev_active,
+            current_iou,
+            prev_threshold_reached,
+            timeout_mask,
+        )
 
-        done = stop_mask | success_mask | timeout_mask
+        done = stop_mask | timeout_mask
         self.active_mask = prev_active & ~done
         self.last_iou = torch.where(prev_active, current_iou, self.last_iou)
+        updated_threshold = prev_threshold_reached | threshold_hit
+        self._threshold_reached = torch.where(prev_active, updated_threshold, self._threshold_reached)
 
-        info = {"iou": current_iou.detach()}
+        info = {"iou": current_iou.detach(), "success": success_mask.detach()}
         next_state = self._get_state()
         return next_state, rewards.detach(), done.detach(), info
 
@@ -386,7 +404,9 @@ class TumorLocalizationEnv:
         actions: torch.Tensor,
         prev_active: torch.Tensor,
         current_iou: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        prev_threshold_reached: torch.Tensor,
+        timeout_mask: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Compute shaped rewards for the tumor localization agent.
         Incorporates step-based shaping (IoU delta + absolute IoU), strong STOP signals,
@@ -410,16 +430,17 @@ class TumorLocalizationEnv:
         stop_mask = (actions == self._STOP_ACTION) & prev_active
         tumor_present = self.has_tumor & prev_active
         no_tumor = (~self.has_tumor) & prev_active
-        success_mask = (current_iou >= self.iou_threshold) & tumor_present
+        threshold_hit = (current_iou >= self.iou_threshold) & tumor_present
+        success_mask = stop_mask & threshold_hit
 
         # Rewards/penalties for STOP decisions
         r_stop_success = self.STOP_REWARD_SUCCESS  # correct STOP when IoU >= threshold
         r_stop_none = self.STOP_REWARD_NO_TUMOR    # correct STOP when no tumor present
         r_stop_false = self.STOP_REWARD_FALSE      # premature/incorrect STOP when tumor present but IoU < threshold
 
-        rewards = rewards + torch.where(stop_mask & success_mask, torch.full_like(rewards, r_stop_success), torch.zeros_like(rewards))
+        rewards = rewards + torch.where(success_mask, torch.full_like(rewards, r_stop_success), torch.zeros_like(rewards))
         rewards = rewards + torch.where(stop_mask & no_tumor, torch.full_like(rewards, r_stop_none), torch.zeros_like(rewards))
-        rewards = rewards + torch.where(stop_mask & tumor_present & ~success_mask, torch.full_like(rewards, r_stop_false), torch.zeros_like(rewards))
+        rewards = rewards + torch.where(stop_mask & tumor_present & ~threshold_hit, torch.full_like(rewards, r_stop_false), torch.zeros_like(rewards))
 
         # --- Non-STOP penalties ---
         # Small universal time penalty: encourages shorter trajectories and decisive moves.
@@ -430,7 +451,12 @@ class TumorLocalizationEnv:
         # If agent should STOP (no tumor OR already successful) but keeps moving, add extra penalty.
         hold_penalty = self.HOLD_PENALTY
         rewards = rewards - torch.where((~stop_mask) & no_tumor, torch.full_like(rewards, hold_penalty), torch.zeros_like(rewards))
-        rewards = rewards - torch.where((~stop_mask) & success_mask, torch.full_like(rewards, hold_penalty), torch.zeros_like(rewards))
+        threshold_hold_mask = prev_threshold_reached & (~stop_mask) & (~timeout_mask) & prev_active
+        rewards = rewards - torch.where(
+            threshold_hold_mask,
+            torch.full_like(rewards, hold_penalty),
+            torch.zeros_like(rewards),
+        )
 
         # Only assign rewards on previously-active envs; keep zeros for finished ones.
         rewards = torch.where(prev_active, rewards, torch.zeros_like(rewards))
@@ -438,8 +464,8 @@ class TumorLocalizationEnv:
         # Optional clipping to stabilize DQN targets.
         min_clip, max_clip = self.REWARD_CLIP_RANGE
         rewards = torch.clamp(rewards, min=min_clip, max=max_clip)
-
-        return rewards, stop_mask, success_mask
+        threshold_hit = torch.where(prev_active, threshold_hit, torch.zeros_like(prev_active, dtype=torch.bool))
+        return rewards, stop_mask, success_mask, threshold_hit
     
     # def _compute_rewards(
     #     self,
