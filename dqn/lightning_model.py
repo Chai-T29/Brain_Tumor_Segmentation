@@ -159,7 +159,7 @@ class DQNLightning(pl.LightningModule):
         self.log("train/mean_iou", mean_iou, on_epoch=True, sync_dist=True)
         self.log("train/epsilon", epsilon_tensor, on_epoch=True, sync_dist=True)
         self.log("train/step_time_sec", step_time_tensor, on_epoch=True, sync_dist=True)
-        self.log("train/action_counts", action_counts, on_epoch=True, sync_dist=True)
+        self._log_action_distribution(action_counts, prefix="train/action_counts")
 
         return mean_loss
 
@@ -273,6 +273,20 @@ class DQNLightning(pl.LightningModule):
 
     def _log_metrics(self, metrics: Dict[str, torch.Tensor], prefix: str) -> None:
         for name, value in metrics.items():
+            if name == "action_counts":
+                self._log_action_distribution(value, prefix=f"{prefix}/{name}")
+                continue
+
             log_name = f"{prefix}/{name}"
             self.log(log_name, value, on_step=False, on_epoch=True, prog_bar=(name == "avg_reward"), sync_dist=True)
+
+    def _log_action_distribution(self, action_counts: torch.Tensor, prefix: str) -> None:
+        """Log action selection frequencies as individual scalar metrics."""
+        if action_counts.ndim == 0 or action_counts.numel() == 1:
+            self.log(prefix, action_counts, on_step=False, on_epoch=True, sync_dist=True)
+            return
+
+        for action_idx, frequency in enumerate(action_counts):
+            log_name = f"{prefix}/action_{action_idx}"
+            self.log(log_name, frequency, on_step=False, on_epoch=True, sync_dist=True)
 
