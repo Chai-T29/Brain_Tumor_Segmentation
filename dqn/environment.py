@@ -5,7 +5,14 @@ import torch.nn.functional as F
 
 
 class TumorLocalizationEnv:
-    """Vectorized environment for batched tumor localization."""
+    """Vectorized environment for batched tumor localization.
+
+    The environment clips rewards to :data:`REWARD_CLIP_RANGE` to stabilise DQN
+    targets.  Downstream losses should therefore expect shaped rewards in the
+    range ``[-6.0, 6.0]`` after all bonuses and penalties are applied.
+    """
+
+    REWARD_CLIP_RANGE: Tuple[float, float] = (-6.0, 6.0)
 
     _STOP_ACTION = 8
 
@@ -401,7 +408,7 @@ class TumorLocalizationEnv:
 
         # Rewards/penalties for STOP decisions
         r_stop_success = 4.0   # correct STOP when IoU >= threshold
-        r_stop_none    = 3.0   # correct STOP when no tumor present
+        r_stop_none    = 2.0   # correct STOP when no tumor present
         r_stop_false   = -3.0  # premature/incorrect STOP when tumor present but IoU < threshold
 
         rewards = rewards + torch.where(stop_mask & success_mask, torch.full_like(rewards, r_stop_success), torch.zeros_like(rewards))
@@ -411,7 +418,8 @@ class TumorLocalizationEnv:
         # --- Non-STOP penalties ---
         # Small universal time penalty: encourages shorter trajectories and decisive moves.
         time_penalty = 0.01
-        rewards = rewards - torch.where(prev_active & ~stop_mask, torch.full_like(rewards, time_penalty), torch.zeros_like(rewards))
+        apply_time_penalty = prev_active & ~stop_mask & ~(no_tumor | success_mask)
+        rewards = rewards - torch.where(apply_time_penalty, torch.full_like(rewards, time_penalty), torch.zeros_like(rewards))
 
         # If agent should STOP (no tumor OR already successful) but keeps moving, add extra penalty.
         hold_penalty = 0.5
@@ -421,8 +429,9 @@ class TumorLocalizationEnv:
         # Only assign rewards on previously-active envs; keep zeros for finished ones.
         rewards = torch.where(prev_active, rewards, torch.zeros_like(rewards))
 
-        # Optional clipping to stabilize DQN targets; adjust if you prefer a wider range.
-        rewards = torch.clamp(rewards, min=-1.0, max=1.0)
+        # Optional clipping to stabilize DQN targets.
+        min_clip, max_clip = self.REWARD_CLIP_RANGE
+        rewards = torch.clamp(rewards, min=min_clip, max=max_clip)
 
         return rewards, stop_mask, success_mask
     
