@@ -35,11 +35,12 @@ class DQNAgent:
 
         self.memory = ReplayMemory(memory_size)
         self.current_epsilon = max(0.0, epsilon_start)
-        if self.epsilon_start <= 0:
-            self._step_decay = 1.0
-        else:
-            ratio = max(self.epsilon_end, 1e-12) / self.epsilon_start
-            self._step_decay = ratio ** (1.0 / self.epsilon_decay)
+        self.global_step = 0
+        # if self.epsilon_start <= 0:
+        #     self._step_decay = 1.0
+        # else:
+        #     ratio = max(self.epsilon_end, 1e-12) / self.epsilon_start
+        #     self._step_decay = ratio ** (1.0 / self.epsilon_decay)
 
     @property
     def device(self) -> torch.device:
@@ -80,7 +81,10 @@ class DQNAgent:
         random_actions = torch.randint(0, self.num_actions, (batch_size,), device=self.device)
         selected_actions = torch.where(random_mask, random_actions, greedy_actions)
 
-        self.current_epsilon = max(self.epsilon_end, self.current_epsilon * self._step_decay)
+        #self.current_epsilon = max(self.epsilon_end, self.current_epsilon * self._step_decay)
+        self.global_step += 1
+        fraction = min(1.0, self.global_step / self.epsilon_decay)
+        self.current_epsilon = self.epsilon_start + fraction * (self.epsilon_end - self.epsilon_start)
         return selected_actions.detach()
 
     def compute_loss(self) -> Optional[torch.Tensor]:

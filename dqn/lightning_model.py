@@ -66,8 +66,8 @@ class DQNLightning(pl.LightningModule):
     # ------------------------------------------------------------------
     # Training loop
     # ------------------------------------------------------------------
-    def on_train_epoch_start(self) -> None:
-        self.agent.set_episode_progress(self.current_epoch, getattr(self.trainer, "max_epochs", None))
+    # def on_train_epoch_start(self) -> None:
+    #     self.agent.set_episode_progress(self.current_epoch, getattr(self.trainer, "max_epochs", None))
 
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
         optimizer = self.optimizers()

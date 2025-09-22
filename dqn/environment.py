@@ -374,30 +374,89 @@ class TumorLocalizationEnv:
         prev_active: torch.Tensor,
         current_iou: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Compute shaped rewards for the tumor localization agent.
+        Incorporates step-based shaping (IoU delta + absolute IoU), strong STOP signals,
+        small universal time penalty, and DQN-friendly reward clipping.
+        """
         if self.last_iou is None:
             raise RuntimeError("Environment must be reset before computing rewards.")
         if self.has_tumor is None:
             raise RuntimeError("Ground-truth tumor presence information missing.")
 
+        # --- Shaping terms ---
+        # 1) Delta-IoU shaping encourages moves that increase IoU step-to-step.
+        # 2) Absolute IoU bonus stabilizes around high-IoU regions (maintain good boxes).
+        #    These two together approximate potential-based shaping with \Psi(s) \propto IoU(s).
         delta_iou = torch.where(prev_active, current_iou - self.last_iou, torch.zeros_like(current_iou))
-        rewards = delta_iou * 2.0
+        alpha = 2.5  # weight for delta-IoU
+        beta = 0.5   # weight for absolute IoU
+        rewards = alpha * delta_iou + beta * torch.where(prev_active, current_iou, torch.zeros_like(current_iou))
 
+        # --- STOP action logic ---
         stop_mask = (actions == self._STOP_ACTION) & prev_active
         tumor_present = self.has_tumor & prev_active
         no_tumor = (~self.has_tumor) & prev_active
-
         success_mask = (current_iou >= self.iou_threshold) & tumor_present
 
-        rewards = rewards + torch.where(stop_mask & no_tumor, torch.full_like(rewards, 2.0), torch.zeros_like(rewards))
-        rewards = rewards + torch.where(stop_mask & success_mask, torch.full_like(rewards, 3.0), torch.zeros_like(rewards))
-        rewards = rewards + torch.where(stop_mask & tumor_present & ~success_mask, -torch.full_like(rewards, 2.5), torch.zeros_like(rewards))
+        # Rewards/penalties for STOP decisions
+        r_stop_success = 4.0   # correct STOP when IoU >= threshold
+        r_stop_none    = 3.0   # correct STOP when no tumor present
+        r_stop_false   = -3.0  # premature/incorrect STOP when tumor present but IoU < threshold
 
-        rewards = rewards + torch.where((~stop_mask) & no_tumor, -torch.full_like(rewards, 0.5), torch.zeros_like(rewards))
-        rewards = rewards + torch.where((~stop_mask) & success_mask, -torch.full_like(rewards, 0.5), torch.zeros_like(rewards))
+        rewards = rewards + torch.where(stop_mask & success_mask, torch.full_like(rewards, r_stop_success), torch.zeros_like(rewards))
+        rewards = rewards + torch.where(stop_mask & no_tumor, torch.full_like(rewards, r_stop_none), torch.zeros_like(rewards))
+        rewards = rewards + torch.where(stop_mask & tumor_present & ~success_mask, torch.full_like(rewards, r_stop_false), torch.zeros_like(rewards))
 
+        # --- Non-STOP penalties ---
+        # Small universal time penalty: encourages shorter trajectories and decisive moves.
+        time_penalty = 0.01
+        rewards = rewards - torch.where(prev_active & ~stop_mask, torch.full_like(rewards, time_penalty), torch.zeros_like(rewards))
+
+        # If agent should STOP (no tumor OR already successful) but keeps moving, add extra penalty.
+        hold_penalty = 0.5
+        rewards = rewards - torch.where((~stop_mask) & no_tumor, torch.full_like(rewards, hold_penalty), torch.zeros_like(rewards))
+        rewards = rewards - torch.where((~stop_mask) & success_mask, torch.full_like(rewards, hold_penalty), torch.zeros_like(rewards))
+
+        # Only assign rewards on previously-active envs; keep zeros for finished ones.
         rewards = torch.where(prev_active, rewards, torch.zeros_like(rewards))
 
+        # Optional clipping to stabilize DQN targets; adjust if you prefer a wider range.
+        rewards = torch.clamp(rewards, min=-1.0, max=1.0)
+
         return rewards, stop_mask, success_mask
+    
+    # def _compute_rewards(
+    #     self,
+    #     actions: torch.Tensor,
+    #     prev_active: torch.Tensor,
+    #     current_iou: torch.Tensor,
+    # ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    #     if self.last_iou is None:
+    #         raise RuntimeError("Environment must be reset before computing rewards.")
+    #     if self.has_tumor is None:
+    #         raise RuntimeError("Ground-truth tumor presence information missing.")
+
+    #     delta_iou = torch.where(prev_active, current_iou - self.last_iou, torch.zeros_like(current_iou))
+    #     rewards = delta_iou * 2.0
+
+    #     stop_mask = (actions == self._STOP_ACTION) & prev_active
+    #     tumor_present = self.has_tumor & prev_active
+    #     no_tumor = (~self.has_tumor) & prev_active
+
+    #     success_mask = (current_iou >= self.iou_threshold) & tumor_present
+
+    #     rewards = rewards + torch.where(stop_mask & no_tumor, torch.full_like(rewards, 2.0), torch.zeros_like(rewards))
+    #     rewards = rewards + torch.where(stop_mask & success_mask, torch.full_like(rewards, 3.0), torch.zeros_like(rewards))
+    #     rewards = rewards + torch.where(stop_mask & tumor_present & ~success_mask, -torch.full_like(rewards, 2.5), torch.zeros_like(rewards))
+
+    #     rewards = rewards + torch.where((~stop_mask) & no_tumor, -torch.full_like(rewards, 0.5), torch.zeros_like(rewards))
+    #     rewards = rewards + torch.where((~stop_mask) & success_mask, -torch.full_like(rewards, 0.5), torch.zeros_like(rewards))
+
+    #     rewards = torch.where(prev_active, rewards, torch.zeros_like(rewards))
+
+    #     return rewards, stop_mask, success_mask
+
 
     def _get_bbox_from_mask(self, masks: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         batch_size = masks.size(0)
