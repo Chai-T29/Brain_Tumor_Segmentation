@@ -8,7 +8,7 @@ import torch.nn.functional as F
 class BrainTumorDataset(Dataset):
     """Brain Tumor Segmentation Dataset for .nii.gz files."""
 
-    def __init__(self, data_dir, transform=None, include_empty_masks=False, resize_shape=None):
+    def __init__(self, data_dir, transform=None, include_empty_masks=False, resize_shape=(224, 224)):
         """
         Args:
             data_dir (string): Directory with all the patient folders.
@@ -79,10 +79,11 @@ class BrainTumorDataset(Dataset):
         return sample
     
     @classmethod
-    def from_samples(cls, samples, transform=None, include_empty_masks=False):
+    def from_samples(cls, samples, transform=None, include_empty_masks=False, resize_shape=(224, 224)):
         obj = cls.__new__(cls)
         obj.data_dir = None
         obj.transform = transform
         obj.include_empty_masks = include_empty_masks
         obj.samples = samples
+        obj.resize_shape = resize_shape
         return obj

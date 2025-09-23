@@ -1,6 +1,6 @@
 data:
   data_dir: "MU-Glioma-Post/"
-  batch_size: 64
+  batch_size: 32
   num_workers: 8
   persistent_workers: true
   pin_memory: true
@@ -17,12 +17,12 @@ training:
   eps_decay: 300000
   memory_size: 50000
   target_update: 5000
-  max_steps: 50
+  max_steps: 100
   grad_clip: 7.0
   lr_gamma: 0.98
   seed: 42
   val_interval: 1
-  max_epochs: 50
+  max_epochs: 30
 
 environment:
   iou_threshold: 0.7

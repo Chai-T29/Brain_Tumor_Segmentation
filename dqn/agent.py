@@ -168,7 +168,7 @@ class DQNAgent:
         if len(self.memory) < self.batch_size:
             return None
 
-        sampled = self.memory.sample(self.batch_size, beta=self.beta)
+        sampled = self.memory.sample(50, beta=self.beta)
         if isinstance(sampled, tuple):
             experiences, indices, weights = sampled
         else:

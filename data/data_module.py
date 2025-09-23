@@ -119,13 +119,13 @@ class BrainTumorDataModule(pl.LightningDataModule):
         # Step 3: build datasets
         # ----------------------------
         self.train_dataset = BrainTumorDataset.from_samples(
-            train_samples, transform=self.transform
+            train_samples, transform=self.transform, resize_shape=(224, 224)
         )
         self.val_dataset = BrainTumorDataset.from_samples(
-            val_samples, transform=self.transform
+            val_samples, transform=self.transform, resize_shape=(224, 224)
         )
         self.test_dataset = BrainTumorDataset.from_samples(
-            test_samples, transform=self.transform
+            test_samples, transform=self.transform, resize_shape=(224, 224)
         )
 
         # Fallbacks if splits are empty
