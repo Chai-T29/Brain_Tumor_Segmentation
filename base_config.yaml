@@ -4,6 +4,7 @@ data:
   num_workers: 4
   persistent_workers: true
   pin_memory: true
+  prefetch_factor: 4
   val_split: 0.1
   test_split: 0.1
   include_empty_masks: false

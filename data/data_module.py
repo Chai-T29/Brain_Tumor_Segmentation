@@ -17,6 +17,7 @@ class BrainTumorDataModule(pl.LightningDataModule):
         num_workers: int = 0,
         persistent_workers: bool = False,
         pin_memory: bool = False,
+        prefetch_factor: int = 4,
         val_split: float = 0.1,
         test_split: float = 0.1,
         seed: int = 42,
@@ -28,6 +29,7 @@ class BrainTumorDataModule(pl.LightningDataModule):
         self.num_workers = num_workers
         self.persistent_workers = persistent_workers
         self.pin_memory = pin_memory
+        self.prefetch_factor = prefetch_factor
         self.val_split = max(0.0, float(val_split))
         self.test_split = max(0.0, float(test_split))
         self.seed = seed
@@ -103,6 +105,7 @@ class BrainTumorDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             persistent_workers=persistent,
             pin_memory=self.pin_memory,
+            prefetch_factor=self.prefetch_factor,
         )
 
     def train_dataloader(self) -> DataLoader:

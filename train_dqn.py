@@ -29,6 +29,7 @@ def main():
         num_workers=data_cfg.get("num_workers", 0),
         persistent_workers=data_cfg.get("persistent_workers", False),
         pin_memory=data_cfg.get("pin_memory", False),
+        prefetch_factor=data_cfg.get("prefetch_factor", 4),
         val_split=data_cfg.get("val_split", 0.1),
         test_split=data_cfg.get("test_split", 0.1),
         seed=training_cfg.get("seed", 42),
