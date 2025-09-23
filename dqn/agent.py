@@ -77,6 +77,43 @@ class DQNAgent:
             self.memory.push(*aggregated)
             buffer.popleft()
 
+    def push_experience_batch(
+        self,
+        state_images: torch.Tensor,
+        state_bboxes: torch.Tensor,
+        actions: torch.Tensor,
+        rewards: torch.Tensor,
+        next_state_images: torch.Tensor,
+        next_state_bboxes: torch.Tensor,
+        done: torch.Tensor,
+    ) -> None:
+        """Push a batch of experiences to the replay buffer without extra cloning."""
+
+        if actions.dim() == 1:
+            actions = actions.view(-1, 1)
+
+        batch_size = state_images.size(0)
+        for env_idx in range(batch_size):
+            done_flag = bool(done[env_idx].item())
+            state = (state_images[env_idx], state_bboxes[env_idx])
+            action = actions[env_idx].view(1, 1)
+            reward = rewards[env_idx].view(1)
+            next_state = None
+            if not done_flag:
+                next_state = (
+                    next_state_images[env_idx],
+                    next_state_bboxes[env_idx],
+                )
+
+            self.push_experience(
+                state,
+                action,
+                reward,
+                next_state,
+                done_flag,
+                env_idx=env_idx,
+            )
+
     def select_action(self, state, env, greedy: bool = False) -> torch.Tensor:
         image, bbox = state
         if image.dim()==3: image=image.unsqueeze(0)
