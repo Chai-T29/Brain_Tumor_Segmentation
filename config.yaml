@@ -1,11 +1,11 @@
 data:
   data_dir: "MU-Glioma-Post/"
-  batch_size: 16
+  batch_size: 24
   num_workers: 8
   persistent_workers: true
   pin_memory: true
   prefetch_factor: 4
-  val_split: 0.1
+  val_split: 0.3
   test_split: 0.1
   include_empty_masks: false
 
@@ -22,7 +22,7 @@ training:
   lr_gamma: 0.98
   seed: 42
   val_interval: 1
-  max_epochs: 30
+  max_epochs: 50
 
 environment:
   iou_threshold: 0.7

@@ -1,9 +1,19 @@
-import nibabel as nib
-from data.dataset import BrainTumorDataset
+import os
 
-dat = BrainTumorDataset("MU-Glioma-Post/")
+def delete_pt_files(root_folder: str) -> None:
+    """
+    Recursively deletes all .pt files from the given root folder.
+    """
+    for dirpath, _, filenames in os.walk(root_folder):
+        for filename in filenames:
+            if filename.endswith(".pt"):
+                file_path = os.path.join(dirpath, filename)
+                try:
+                    os.remove(file_path)
+                    print(f"Deleted: {file_path}")
+                except Exception as e:
+                    print(f"Failed to delete {file_path}: {e}")
 
-for i in range(dat.__len__()):
-    shap = dat.__getitem__(i)["image"].shape
-    if shap != (1, 240, 240):
-        print(shap)
+if __name__ == "__main__":
+    target_folder = "MU-Glioma-Post"  # adjust path if needed
+    delete_pt_files(target_folder)
