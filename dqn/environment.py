@@ -150,6 +150,8 @@ class TumorLocalizationEnv:
 
         image = self.images[index].detach().cpu()
         image_np = image.permute(1, 2, 0).numpy()
+        if image_np.shape[-1] == 1:
+            image_np = image_np[..., 0]
         min_val = float(image_np.min())
         max_val = float(image_np.max())
         if max_val > min_val:

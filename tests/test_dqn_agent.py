@@ -74,9 +74,9 @@ def test_optimize_model_handles_terminal_transition():
     )
 
     # Construct two experiences, one of which is terminal with no next state.
-    image = torch.zeros(3, 84, 84)
+    image = torch.zeros(1, 84, 84)
     bbox = torch.zeros(4)
-    next_image = torch.ones(3, 84, 84)
+    next_image = torch.ones(1, 84, 84)
     next_bbox = torch.ones(4)
 
     agent.memory.push(
@@ -97,7 +97,11 @@ def test_optimize_model_handles_terminal_transition():
 
     random.seed(0)
     np.random.seed(0)
-    experiences, indices, weights = agent.memory.sample(agent.batch_size)
+    sampled = agent.memory.sample(agent.batch_size)
+    if isinstance(sampled, tuple):
+        experiences = sampled[0]
+    else:
+        experiences = list(sampled)
     expected_loss, expected_targets = _compute_expected_loss(agent, experiences)
 
     # Ensure terminal transitions produce targets equal to their rewards.
