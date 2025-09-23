@@ -99,31 +99,28 @@ class DQNLightning(pl.LightningModule):
             ).to(self.device, dtype=action_counts.dtype)
 
             rewards_device = rewards.to(self.device)
+            rewards_cpu = rewards.detach().cpu()
             cumulative_rewards += rewards_device
             steps_taken += active_mask.float()
             iou_values.append(info["iou"].to(self.device))
 
-            for idx in range(batch_size):
-                state_sample = (
-                    state[0][idx].detach().cpu().clone(),
-                    state[1][idx].detach().cpu().clone(),
-                )
-                action_sample = actions[idx].view(1, 1).detach().cpu()
-                reward_sample = rewards_device[idx].view(1).detach().cpu()
-                next_state_sample: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
-                if not bool(done[idx].item()):
-                    next_state_sample = (
-                        next_state[0][idx].detach().cpu().clone(),
-                        next_state[1][idx].detach().cpu().clone(),
-                    )
-                self.agent.push_experience(
-                    state_sample,
-                    action_sample,
-                    reward_sample,
-                    next_state_sample,
-                    bool(done[idx].item()),
-                    env_idx=idx,
-                )
+            state_images_cpu = state[0].detach().cpu()
+            state_bboxes_cpu = state[1].detach().cpu()
+            next_state_images_cpu = next_state[0].detach().cpu()
+            next_state_bboxes_cpu = next_state[1].detach().cpu()
+            actions_cpu = actions.detach().view(-1, 1).cpu()
+            rewards_cpu = rewards_cpu.view(-1)
+            done_cpu = done.detach().cpu()
+
+            self.agent.push_experience_batch(
+                state_images_cpu,
+                state_bboxes_cpu,
+                actions_cpu,
+                rewards_cpu,
+                next_state_images_cpu,
+                next_state_bboxes_cpu,
+                done_cpu,
+            )
 
             loss = self.agent.compute_loss()
             if loss is not None:
