@@ -61,7 +61,7 @@ class QNetwork(nn.Module):
     def __init__(self, num_actions=9):
         super(QNetwork, self).__init__()
         # CNN for the image. Assumes input image is resized to 84x84.
-        self.conv1 = nn.Conv2d(3, 32, kernel_size=8, stride=4)
+        self.conv1 = nn.Conv2d(1, 32, kernel_size=8, stride=4)
         self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
         self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
 
@@ -97,7 +97,7 @@ class DuelingQNetwork(nn.Module):
     def __init__(self, num_actions=9):
         super(DuelingQNetwork, self).__init__()
         # CNN for the image. Assumes input image is resized to 84x84.
-        self.conv1 = nn.Conv2d(3, 32, kernel_size=8, stride=4)
+        self.conv1 = nn.Conv2d(1, 32, kernel_size=8, stride=4)
         self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
         self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
 
@@ -190,6 +190,9 @@ class DuelingQNetworkHF(nn.Module):
 
     def forward(self, image, bbox):
         # Assumes image is [B, C, H, W] in torch.Tensor
+        if image.size(1) == 1:
+            image = image.repeat(1, 3, 1, 1)
+
         # HF backbones expect pixel_values preprocessed
         pixel_values = self.processor(images=image, return_tensors="pt").pixel_values.to(image.device)
 
@@ -220,7 +223,7 @@ class NoisyDuelingQNetwork(nn.Module):
     def __init__(self, num_actions: int = 9) -> None:
         super().__init__()
 
-        self.conv1 = nn.Conv2d(3, 32, kernel_size=8, stride=4)
+        self.conv1 = nn.Conv2d(1, 32, kernel_size=8, stride=4)
         self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
         self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
 

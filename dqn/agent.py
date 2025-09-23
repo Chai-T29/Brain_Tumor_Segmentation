@@ -132,9 +132,12 @@ class DQNAgent:
             return None
 
         sampled = self.memory.sample(self.batch_size, beta=self.beta)
-        experiences = list(sampled)
-        indices = sampled.indices
-        weights = sampled.weights
+        if isinstance(sampled, tuple):
+            experiences, indices, weights = sampled
+        else:
+            experiences = list(sampled)
+            indices = sampled.indices
+            weights = sampled.weights
         self.beta = min(1.0, self.beta + self.beta_increment_per_sampling)
         batch = Experience(*zip(*experiences))
         weights = weights.to(self.device)

@@ -66,12 +66,8 @@ class BrainTumorDataset(Dataset):
         mask_slice = mask_data[:, :, slice_idx]
 
         # Convert to float tensors
-        image = torch.from_numpy(image_slice).float().unsqueeze(0) # Add channel dimension
+        image = torch.from_numpy(image_slice).float().unsqueeze(0)  # Add channel dimension
         mask = torch.from_numpy(mask_slice).float().unsqueeze(0)
-
-        # The U-Net I created expects 3 input channels.
-        # The T1c image is single channel. I will stack it 3 times to simulate a 3-channel image.
-        image = image.repeat(3, 1, 1)
 
 
         sample = {'image': image, 'mask': mask}
