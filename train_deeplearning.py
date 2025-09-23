@@ -8,7 +8,7 @@ def main():
     data_module = BrainTumorDataModule(data_dir="MU-Glioma-Post/", batch_size=16)
 
     # Initialize the Model
-    model = UNet(in_channels=3, out_channels=1)
+    model = UNet(in_channels=1, out_channels=1)
 
     # Initialize the Trainer
     # Adjust trainer settings as needed (e.g., gpus, max_epochs)
