@@ -3,11 +3,12 @@ from torch.utils.data import Dataset
 import os
 import nibabel as nib
 import numpy as np
+import torch.nn.functional as F
 
 class BrainTumorDataset(Dataset):
     """Brain Tumor Segmentation Dataset for .nii.gz files."""
 
-    def __init__(self, data_dir, transform=None, include_empty_masks: bool = False):
+    def __init__(self, data_dir, transform=None, include_empty_masks=False, resize_shape=None):
         """
         Args:
             data_dir (string): Directory with all the patient folders.
@@ -19,7 +20,8 @@ class BrainTumorDataset(Dataset):
         """
         self.data_dir = data_dir
         self.transform = transform
-        self.include_empty_masks = bool(include_empty_masks)
+        self.include_empty_masks = include_empty_masks
+        self.resize_shape = resize_shape
         self.samples = []
 
         for patient_dir in sorted(os.listdir(data_dir)):
@@ -64,16 +66,16 @@ class BrainTumorDataset(Dataset):
         mask_data = mask_nii.get_fdata()
         mask_slice = mask_data[:, :, slice_idx]
 
-        # Convert to float tensors
-        image = torch.from_numpy(image_slice).float().unsqueeze(0)  # Add channel dimension
+        image = torch.from_numpy(image_slice).float().unsqueeze(0)  # (1,H,W)
         mask = torch.from_numpy(mask_slice).float().unsqueeze(0)
 
+        if self.resize_shape is not None:
+            image = F.interpolate(image.unsqueeze(0), size=self.resize_shape, mode="bilinear", align_corners=False).squeeze(0)
+            mask = F.interpolate(mask.unsqueeze(0), size=self.resize_shape, mode="nearest").squeeze(0)
 
-        sample = {'image': image, 'mask': mask}
-
+        sample = {"image": image, "mask": mask}
         if self.transform:
             sample = self.transform(sample)
-
         return sample
     
     @classmethod
