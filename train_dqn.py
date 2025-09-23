@@ -16,6 +16,11 @@ def load_config(path: str) -> dict:
 
 
 def main():
+    data_cfg = config.get("data", {})
+    training_cfg = config.get("training", {})
+    env_cfg = config.get("environment", {})
+    logging_cfg = config.get("logging", {})
+
     import numpy as np, random, pytorch_lightning as pl, torch
     seed = training_cfg.get("seed", 42)
     pl.seed_everything(seed, workers=True)
@@ -23,11 +28,6 @@ def main():
     random.seed(seed)
     torch.use_deterministic_algorithms(True)  # optional, if you really need it
     config = load_config("config.yaml")
-
-    data_cfg = config.get("data", {})
-    training_cfg = config.get("training", {})
-    env_cfg = config.get("environment", {})
-    logging_cfg = config.get("logging", {})
 
     data_module = BrainTumorDataModule(
         data_dir=data_cfg.get("data_dir", "MU-Glioma-Post/"),

@@ -51,17 +51,17 @@ def find_best_checkpoint(
 
 
 def main():
+    config = load_config("config.yaml")
+    data_cfg = config.get("data", {})
+    training_cfg = config.get("training", {})
+    env_cfg = config.get("environment", {})
+    logging_cfg = config.get("logging", {})
     import numpy as np, random, pytorch_lightning as pl, torch
     seed = training_cfg.get("seed", 42)
     pl.seed_everything(seed, workers=True)
     np.random.seed(seed)
     random.seed(seed)
     torch.use_deterministic_algorithms(True)  # optional, if you really need it
-    config = load_config("config.yaml")
-    data_cfg = config.get("data", {})
-    training_cfg = config.get("training", {})
-    env_cfg = config.get("environment", {})
-    logging_cfg = config.get("logging", {})
 
     log_dir = Path(logging_cfg.get("log_dir", "lightning_logs"))
     logger_name = logging_cfg.get("logger_name", "dqn_agent")
