@@ -520,44 +520,51 @@ class TumorLocalizationEnv:
     @torch.no_grad()
     def _candidate_boxes_all_actions(self) -> torch.Tensor:
         """Return candidate boxes for all actions, shape (B, 8, 4)."""
+        assert self.current_bboxes_unscaled is not None and self.images is not None
         x, y, w, h = self.current_bboxes_unscaled.unbind(dim=1)
-        B = x.size(0)
 
-        width_limit = torch.tensor(self.images.size(-1), device=self.device, dtype=torch.float32)
-        height_limit = torch.tensor(self.images.size(-2), device=self.device, dtype=torch.float32)
-        step = torch.full_like(x, self.step_size)
-        scale = torch.full_like(x, self.scale_factor)
-        min_size = torch.full_like(x, self.min_bbox_size)
+        width_limit  = torch.as_tensor(self.images.size(-1), device=self.device, dtype=torch.float32)
+        height_limit = torch.as_tensor(self.images.size(-2), device=self.device, dtype=torch.float32)
+        step   = torch.full_like(x, self.step_size)
+        scale  = torch.full_like(x, self.scale_factor)
+        min_sz = torch.full_like(x, self.min_bbox_size)
+        zero_x = torch.zeros_like(x)
+        zero_y = torch.zeros_like(y)
 
         # Moves
-        y_up = torch.clamp(y - step, min=0.0)
-        y_down = torch.clamp(y + step, max=torch.clamp(height_limit - h, min=0.0))
-        x_left = torch.clamp(x - step, min=0.0)
-        x_right = torch.clamp(x + step, max=torch.clamp(width_limit - w, min=0.0))
+        y_up    = torch.clamp(y - step, min=0.0)
+        y_down  = torch.clamp(y + step, max=torch.clamp(height_limit - h, min=0.0))
+        x_left  = torch.clamp(x - step, min=0.0)
+        x_right = torch.clamp(x + step, max=torch.clamp(width_limit - w,  min=0.0))
 
-        # Width changes
+        # Resizes (top-left anchored, consistent with _apply_action)
         w_exp = torch.clamp(w * scale, max=width_limit)
-        w_shr = torch.clamp(w / scale, min=min_size)
-        # Height changes
+        w_shr = torch.clamp(w / scale, min=min_sz)
         h_exp = torch.clamp(h * scale, max=height_limit)
-        h_shr = torch.clamp(h / scale, min=min_size)
+        h_shr = torch.clamp(h / scale, min=min_sz)
 
-        # Keep inside bounds
-        x_exp_ok = torch.clamp(x, min=0.0, max=torch.clamp(width_limit - w_exp, min=0.0))
-        y_exp_ok = torch.clamp(y, min=0.0, max=torch.clamp(height_limit - h_exp, min=0.0))
-        x_shr_ok = torch.clamp(x, min=0.0, max=torch.clamp(width_limit - w_shr, min=0.0))
-        y_shr_ok = torch.clamp(y, min=0.0, max=torch.clamp(height_limit - h_shr, min=0.0))
+        # Keep boxes inside image (avoid clamp mixed types by doing it in two steps)
+        max_x_exp = torch.clamp(width_limit - w_exp, min=0.0)
+        max_y_exp = torch.clamp(height_limit - h_exp, min=0.0)
+        x_exp_ok  = torch.minimum(torch.clamp(x, min=0.0), max_x_exp)
+        y_exp_ok  = torch.minimum(torch.clamp(y, min=0.0), max_y_exp)
 
-        c0 = torch.stack([x, y_up, w, h], dim=1)
-        c1 = torch.stack([x, y_down, w, h], dim=1)
-        c2 = torch.stack([x_left, y, w, h], dim=1)
-        c3 = torch.stack([x_right, y, w, h], dim=1)
-        c4 = torch.stack([x_exp_ok, y, w_exp, h], dim=1)
-        c5 = torch.stack([x_shr_ok, y, w_shr, h], dim=1)
-        c6 = torch.stack([x, y_exp_ok, w, h_exp], dim=1)
-        c7 = torch.stack([x, y_shr_ok, w, h_shr], dim=1)
+        max_x_shr = torch.clamp(width_limit - w_shr, min=0.0)
+        max_y_shr = torch.clamp(height_limit - h_shr, min=0.0)
+        x_shr_ok  = torch.minimum(torch.clamp(x, min=0.0), max_x_shr)
+        y_shr_ok  = torch.minimum(torch.clamp(y, min=0.0), max_y_shr)
 
-        return torch.stack([c0, c1, c2, c3, c4, c5, c6, c7], dim=1)
+        # Build 8 candidates (0..7)
+        c0 = torch.stack([x,       y_up,   w,     h    ], dim=1)
+        c1 = torch.stack([x,       y_down, w,     h    ], dim=1)
+        c2 = torch.stack([x_left,  y,      w,     h    ], dim=1)
+        c3 = torch.stack([x_right, y,      w,     h    ], dim=1)
+        c4 = torch.stack([x_exp_ok,y,      w_exp, h    ], dim=1)
+        c5 = torch.stack([x_shr_ok,y,      w_shr, h    ], dim=1)
+        c6 = torch.stack([x,       y_exp_ok,w,    h_exp], dim=1)
+        c7 = torch.stack([x,       y_shr_ok,w,    h_shr], dim=1)
+
+        return torch.stack([c0,c1,c2,c3,c4,c5,c6,c7], dim=1)  # (B,8,4)
 
     @torch.no_grad()
     def _iou_candidates(self, cand: torch.Tensor) -> torch.Tensor:
