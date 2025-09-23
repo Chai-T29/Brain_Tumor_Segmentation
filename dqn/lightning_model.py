@@ -3,8 +3,10 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import imageio.v2 as imageio
+import matplotlib.pyplot as plt
 import pytorch_lightning as pl
 import torch
+import numpy as np
 
 from dqn.agent import DQNAgent
 from dqn.environment import TumorLocalizationEnv
@@ -149,9 +151,6 @@ class DQNLightning(pl.LightningModule):
 
         epsilon_tensor = torch.tensor(self.agent.current_epsilon, device=self.device)
         step_time_tensor = torch.tensor(step_time, device=self.device)
-        total_actions = action_counts.sum()
-        if total_actions > 0:
-            action_counts = action_counts / total_actions
 
         self.log("train/episode_reward", avg_reward, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("train/episode_length", avg_length, on_epoch=True, sync_dist=True)
@@ -200,11 +199,27 @@ class DQNLightning(pl.LightningModule):
         )
         self._log_metrics(metrics, prefix="test")
 
+        action_counts = np.zeros(9)
         if record and frames:
             reward_value = metrics["avg_reward"].item()
             gif_name = f"episode_{self._test_episode_index:03d}_reward_{reward_value:.2f}.gif"
             imageio.mimsave(self._gif_output_dir / gif_name, frames, fps=self.hparams.test_gif_fps)
             self._test_episode_index += 1
+
+            action_counts = action_counts + metrics["action_counts"].cpu().numpy()
+
+        # Generate and save histogram of action counts
+        plt.figure(figsize=(8, 6))
+        plt.bar(range(len(action_counts)), action_counts)
+        plt.xlabel("Action")
+        plt.ylabel("Frequency")
+        plt.title("Action Counts Histogram")
+        plt.tight_layout()
+        hist_dir = self._gif_output_dir.parent
+        hist_dir.mkdir(parents=True, exist_ok=True)
+        hist_filename = hist_dir / f"action_counts.png"
+        plt.savefig(hist_filename)
+        plt.close()
 
         return metrics
 
@@ -264,10 +279,10 @@ class DQNLightning(pl.LightningModule):
                 break
 
         metrics = {
-            "avg_reward": cumulative_rewards.mean(),
-            "episode_length": steps_taken.mean(),
+            "avg_reward": cumulative_rewards.mean() if cumulative_rewards.numel() > 0 else torch.tensor(0.0, device=self.device),
+            "episode_length": steps_taken.mean() if steps_taken.numel() > 0 else torch.tensor(0.0, device=self.device),
             "mean_iou": torch.cat(iou_values).mean() if iou_values else torch.tensor(0.0, device=self.device),
-            "action_counts": action_counts / action_counts.sum().clamp_min(1.0),
+            "action_counts": action_counts,
         }
         return metrics, frames if record else None
 
@@ -289,4 +304,3 @@ class DQNLightning(pl.LightningModule):
         for action_idx, frequency in enumerate(action_counts):
             log_name = f"{prefix}/action_{action_idx}"
             self.log(log_name, frequency, on_step=False, on_epoch=True, sync_dist=True)
-

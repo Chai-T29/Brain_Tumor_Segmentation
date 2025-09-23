@@ -15,7 +15,7 @@ training:
   eps_end: 0.02
   eps_decay: 500000
   memory_size: 150000
-  target_update: 1000
+  target_update: 500
   max_steps: 50
   grad_clip: 7.0
   lr_gamma: 0.95

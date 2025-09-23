@@ -99,8 +99,6 @@ def main():
     except Exception as e:
         print(e)
 
-    trainer.test(model, datamodule=data_module, ckpt_path="best")
-
 
 if __name__ == "__main__":
     main()

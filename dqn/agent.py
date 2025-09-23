@@ -96,7 +96,7 @@ class DQNAgent:
         if greedy:
             return greedy_actions.detach()
         
-        # 
+        # Moving towards positive IOU values in exploration
         selected_actions = []
         for i in range(batch_size):
             if torch.rand(1).item() < self.current_epsilon:
