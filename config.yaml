@@ -10,22 +10,22 @@ data:
   include_empty_masks: false
 
 training:
-  lr: 0.001
+  lr: 0.0005
   gamma: 0.98
   eps_start: 1.0
   eps_end: 0.02
-  eps_decay: 500000
-  memory_size: 1000
-  target_update: 100
+  eps_decay: 300000
+  memory_size: 50000
+  target_update: 5000
   max_steps: 50
   grad_clip: 7.0
-  lr_gamma: 0.95
+  lr_gamma: 0.98
   seed: 42
   val_interval: 1
   max_epochs: 50
 
 environment:
-  iou_threshold: 0.5
+  iou_threshold: 0.7
 
 logging:
   log_dir: "lightning_logs"

@@ -152,12 +152,12 @@ class DQNLightning(pl.LightningModule):
         epsilon_tensor = torch.tensor(self.agent.current_epsilon, device=self.device)
         step_time_tensor = torch.tensor(step_time, device=self.device)
 
-        self.log("train_episode_reward", avg_reward, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log("train_episode_length", avg_length, on_epoch=True, sync_dist=True)
-        self.log("train_loss", mean_loss, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log("train_mean_iou", mean_iou, on_epoch=True, sync_dist=True)
-        self.log("train_epsilon", epsilon_tensor, on_epoch=True, sync_dist=True)
-        self.log("train_step_time_sec", step_time_tensor, on_epoch=True, sync_dist=True)
+        self.log("train/episode_reward", avg_reward, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("train/episode_length", avg_length, on_epoch=True, sync_dist=True)
+        self.log("train/loss", mean_loss, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("train/mean_iou", mean_iou, on_epoch=True, sync_dist=True)
+        self.log("train/epsilon", epsilon_tensor, on_epoch=True, sync_dist=True)
+        self.log("train/step_time_sec", step_time_tensor, on_epoch=True, sync_dist=True)
         self._log_action_distribution(action_counts, prefix="train_action_counts")
 
         return mean_loss
@@ -286,14 +286,16 @@ class DQNLightning(pl.LightningModule):
         }
         return metrics, frames if record else None
 
-    def _log_metrics(self, metrics: Dict[str, torch.Tensor], prefix: str) -> None:
+    def _log_metrics(self, metrics, prefix: str) -> None:
         for name, value in metrics.items():
             if name == "action_counts":
                 self._log_action_distribution(value, prefix=f"{prefix}/{name}")
                 continue
-
-            log_name = f"{prefix}_{name}"
+            log_name = f"{prefix}/{name}"
             self.log(log_name, value, on_step=False, on_epoch=True, prog_bar=(name == "avg_reward"), sync_dist=True)
+            if prefix == "val" and name == "avg_reward":
+                # Alias for checkpoint filename formatting
+                self.log("val_avg_reward", value, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
 
     def _log_action_distribution(self, action_counts: torch.Tensor, prefix: str) -> None:
         """Log action selection frequencies as individual scalar metrics."""
@@ -302,5 +304,5 @@ class DQNLightning(pl.LightningModule):
             return
 
         for action_idx, frequency in enumerate(action_counts):
-            log_name = f"{prefix}_action_{action_idx}"
+            log_name = f"{prefix}/action_{action_idx}"
             self.log(log_name, frequency, on_step=True, on_epoch=True, sync_dist=True)
