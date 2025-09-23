@@ -16,6 +16,7 @@ def load_config(path: str) -> dict:
 
 
 def main():
+    config = load_config("config.yaml")
     data_cfg = config.get("data", {})
     training_cfg = config.get("training", {})
     env_cfg = config.get("environment", {})
@@ -27,7 +28,6 @@ def main():
     np.random.seed(seed)
     random.seed(seed)
     torch.use_deterministic_algorithms(True)  # optional, if you really need it
-    config = load_config("config.yaml")
 
     data_module = BrainTumorDataModule(
         data_dir=data_cfg.get("data_dir", "MU-Glioma-Post/"),
