@@ -51,6 +51,12 @@ def find_best_checkpoint(
 
 
 def main():
+    import numpy as np, random, pytorch_lightning as pl, torch
+    seed = training_cfg.get("seed", 42)
+    pl.seed_everything(seed, workers=True)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.use_deterministic_algorithms(True)  # optional, if you really need it
     config = load_config("config.yaml")
     data_cfg = config.get("data", {})
     training_cfg = config.get("training", {})
@@ -86,7 +92,7 @@ def main():
         data_dir=data_cfg.get("data_dir", "MU-Glioma-Post/"),
         batch_size=data_cfg.get("batch_size", 16),
         num_workers=data_cfg.get("num_workers", 0),
-        persistent_workers=False,
+        persistent_workers=data_cfg.get("persistent_workers", False),
         pin_memory=False,
         val_split=data_cfg.get("val_split", 0.1),
         test_split=data_cfg.get("test_split", 0.1),

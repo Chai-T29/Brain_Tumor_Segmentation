@@ -1,11 +1,24 @@
-from typing import Optional
-
-import pytorch_lightning as pl
+import os
+import random
 import torch
 from torch.utils.data import DataLoader, random_split
-
+from typing import Optional
+import pytorch_lightning as pl
 from data.dataset import BrainTumorDataset
 
+class NormalizeSlice:
+    def __call__(self, sample):
+        image, mask = sample["image"], sample["mask"]  # [1,H,W]
+        nz = (image != 0)
+        if nz.any():
+            mean = image[nz].mean()
+            std = image[nz].std().clamp(min=1e-6)
+        else:
+            mean = image.mean()
+            std = image.std().clamp(min=1e-6)
+        image = (image - mean) / std
+        image = image.clamp_(-3, 3)
+        return {"image": image, "mask": mask}
 
 class BrainTumorDataModule(pl.LightningDataModule):
     """PyTorch Lightning data module that serves as the single entry point for data."""
@@ -33,7 +46,7 @@ class BrainTumorDataModule(pl.LightningDataModule):
         self.val_split = max(0.0, float(val_split))
         self.test_split = max(0.0, float(test_split))
         self.seed = seed
-        self.transform = None  # Add your transforms here if needed
+        self.transform = NormalizeSlice()
         self.include_empty_masks = bool(include_empty_masks)
 
         self.train_dataset = None
@@ -44,53 +57,81 @@ class BrainTumorDataModule(pl.LightningDataModule):
         if stage not in (None, "fit", "validate", "test"):
             return
 
-        dataset = BrainTumorDataset(
-            self.data_dir,
-            transform=self.transform,
-            include_empty_masks=self.include_empty_masks,
+        # ----------------------------
+        # Step 1: group by patient/timepoint
+        # ----------------------------
+        groups = []  # each entry: (image_path, mask_path, [slice_idxs])
+        for patient_dir in sorted(os.listdir(self.data_dir)):
+            patient_path = os.path.join(self.data_dir, patient_dir)
+            if not os.path.isdir(patient_path):
+                continue
+            for timepoint_dir in sorted(os.listdir(patient_path)):
+                timepoint_path = os.path.join(patient_path, timepoint_dir)
+                if not os.path.isdir(timepoint_path):
+                    continue
+
+                image_path, mask_path = None, None
+                for f in os.listdir(timepoint_path):
+                    if f.endswith("_brain_t1c.nii.gz"):
+                        image_path = os.path.join(timepoint_path, f)
+                    elif f.endswith("_tumorMask.nii.gz"):
+                        mask_path = os.path.join(timepoint_path, f)
+
+                if image_path and mask_path:
+                    import nibabel as nib
+                    import numpy as np
+                    mask_nii = nib.load(mask_path)
+                    mask_data = mask_nii.get_fdata()
+                    slice_indices = []
+                    for i in range(mask_data.shape[2]):
+                        has_tumor = np.sum(mask_data[:, :, i]) > 0
+                        if has_tumor or self.include_empty_masks:
+                            slice_indices.append(i)
+                    if slice_indices:
+                        groups.append((image_path, mask_path, slice_indices))
+
+        if not groups:
+            raise RuntimeError("No patient/timepoint groups found in dataset.")
+
+        # ----------------------------
+        # Step 2: split groups (not slices)
+        # ----------------------------
+        rng = random.Random(self.seed)
+        rng.shuffle(groups)
+        n_total = len(groups)
+        n_val = int(self.val_split * n_total)
+        n_test = int(self.test_split * n_total)
+        val_groups = groups[:n_val]
+        test_groups = groups[n_val : n_val + n_test]
+        train_groups = groups[n_val + n_test :]
+
+        def expand(groups_list):
+            samples = []
+            for img, msk, idxs in groups_list:
+                samples.extend([(img, msk, i) for i in idxs])
+            return samples
+
+        train_samples = expand(train_groups)
+        val_samples = expand(val_groups)
+        test_samples = expand(test_groups)
+
+        # ----------------------------
+        # Step 3: build datasets
+        # ----------------------------
+        self.train_dataset = BrainTumorDataset.from_samples(
+            train_samples, transform=self.transform
         )
-        total_samples = len(dataset)
-        if total_samples == 0:
-            raise RuntimeError("BrainTumorDataset is empty. Please verify the dataset path and contents.")
+        self.val_dataset = BrainTumorDataset.from_samples(
+            val_samples, transform=self.transform
+        )
+        self.test_dataset = BrainTumorDataset.from_samples(
+            test_samples, transform=self.transform
+        )
 
-        val_ratio = max(0.0, float(self.val_split))
-        test_ratio = max(0.0, float(self.test_split))
-        train_ratio = max(0.0, 1.0 - val_ratio - test_ratio)
-
-        ratio_sum = train_ratio + val_ratio + test_ratio
-        if ratio_sum == 0:
-            train_ratio = 1.0
-            ratio_sum = 1.0
-
-        train_ratio /= ratio_sum
-        val_ratio /= ratio_sum
-        test_ratio /= ratio_sum
-
-        ratios = [train_ratio, val_ratio, test_ratio]
-        lengths = [int(r * total_samples) for r in ratios]
-        remainder = total_samples - sum(lengths)
-
-        if remainder > 0:
-            order = sorted(range(len(ratios)), key=lambda idx: ratios[idx], reverse=True)
-            for idx in order:
-                if remainder == 0:
-                    break
-                lengths[idx] += 1
-                remainder -= 1
-
-        if lengths[0] == 0 and total_samples > 0:
-            largest_idx = max(range(len(lengths)), key=lambda idx: lengths[idx])
-            if lengths[largest_idx] > 0:
-                lengths[largest_idx] -= 1
-                lengths[0] += 1
-
-        generator = torch.Generator().manual_seed(self.seed)
-        subsets = list(random_split(dataset, lengths, generator=generator))
-
-        self.train_dataset, self.val_dataset, self.test_dataset = subsets
-        if lengths[1] == 0:
+        # Fallbacks if splits are empty
+        if not val_samples:
             self.val_dataset = self.train_dataset
-        if lengths[2] == 0:
+        if not test_samples:
             self.test_dataset = self.val_dataset
 
     def _dataloader(self, dataset, shuffle: bool = False) -> DataLoader:

@@ -47,7 +47,6 @@ class BrainTumorDataset(Dataset):
                         if has_tumor or self.include_empty_masks:
                             self.samples.append((image_path, mask_path, i))
 
-
     def __len__(self):
         return len(self.samples)
 
@@ -76,3 +75,12 @@ class BrainTumorDataset(Dataset):
             sample = self.transform(sample)
 
         return sample
+    
+    @classmethod
+    def from_samples(cls, samples, transform=None, include_empty_masks=False):
+        obj = cls.__new__(cls)
+        obj.data_dir = None
+        obj.transform = transform
+        obj.include_empty_masks = include_empty_masks
+        obj.samples = samples
+        return obj

@@ -189,7 +189,8 @@ class DQNAgent:
 
             next_state_values[non_final_mask] = q_next_chosen
 
-        expected_state_action_values = (next_state_values * self.gamma) + reward_batch
+        n_used_batch = torch.tensor([n for n in batch.n_used], device=self.device, dtype=torch.float32)
+        expected_state_action_values = reward_batch + (self.gamma ** n_used_batch) * next_state_values
         td_target = expected_state_action_values.unsqueeze(1)
         loss_elements = F.smooth_l1_loss(state_action_values, td_target, reduction="none")
         loss = (loss_elements * weights.view(-1, 1)).mean()
@@ -204,14 +205,15 @@ class DQNAgent:
         next_state = transitions[-1][3]
         done = transitions[-1][4]
 
+        n_used = 0
         for idx, (_, _, reward, step_next_state, step_done) in enumerate(transitions):
             cumulative_reward += (self.gamma ** idx) * reward
+            n_used += 1
             if step_done:
                 next_state = None
                 done = True
                 break
-
-        return state, action, cumulative_reward, next_state, done
+        return state, action, cumulative_reward, next_state, done, n_used
 
     def update_target_net(self) -> None:
         """Updates the target network with the policy network's weights."""

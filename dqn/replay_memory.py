@@ -12,8 +12,7 @@ class PrioritizedSample(list):
         self.indices = indices
         self.weights = weights
 
-Experience = namedtuple('Experience',
-                        ('state', 'action', 'reward', 'next_state', 'done'))
+Experience = namedtuple('Experience', ('state','action','reward','next_state','done','n_used'))
 
 class PrioritizedReplayMemory:
     """Prioritized replay buffer implementation with proportional prioritisation."""

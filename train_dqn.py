@@ -16,6 +16,12 @@ def load_config(path: str) -> dict:
 
 
 def main():
+    import numpy as np, random, pytorch_lightning as pl, torch
+    seed = training_cfg.get("seed", 42)
+    pl.seed_everything(seed, workers=True)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.use_deterministic_algorithms(True)  # optional, if you really need it
     config = load_config("config.yaml")
 
     data_cfg = config.get("data", {})
@@ -29,7 +35,7 @@ def main():
         num_workers=data_cfg.get("num_workers", 0),
         persistent_workers=data_cfg.get("persistent_workers", False),
         pin_memory=data_cfg.get("pin_memory", False),
-        prefetch_factor=data_cfg.get("prefetch_factor", 4),
+        prefetch_factor=data_cfg.get("prefetch_factor", 2),
         val_split=data_cfg.get("val_split", 0.1),
         test_split=data_cfg.get("test_split", 0.1),
         seed=training_cfg.get("seed", 42),
@@ -66,7 +72,7 @@ def main():
     checkpoint_dir = Path(logger.log_dir) / checkpoint_subdir
 
     checkpoint_callback = ModelCheckpoint(
-        monitor="val/avg_reward",
+        monitor="val_avg_reward",
         dirpath=str(checkpoint_dir),
         filename="dqn-epoch{epoch:02d}-reward{val_avg_reward:.2f}",
         save_top_k=3,
@@ -74,7 +80,7 @@ def main():
     )
 
     early_stopping = EarlyStopping(
-        monitor="val/avg_reward",
+        monitor="val_avg_reward",
         min_delta=1e-3,
         patience=logging_cfg.get("early_stopping_patience", 20),
         mode="max",
