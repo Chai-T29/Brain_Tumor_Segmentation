@@ -165,10 +165,11 @@ class DQNAgent:
 
     def compute_loss(self) -> Optional[torch.Tensor]:
         """Computes the DQN loss without performing an optimization step."""
-        if len(self.memory) < self.batch_size:
+        sample_n = 50
+        if len(self.memory) < sample_n:
             return None
 
-        sampled = self.memory.sample(50, beta=self.beta)
+        sampled = self.memory.sample(sample_n, beta=self.beta)
         if isinstance(sampled, tuple):
             experiences, indices, weights = sampled
         else:
@@ -209,7 +210,7 @@ class DQNAgent:
         #     )
 
         # Double-DQN Setup (reduces overestimation bias)
-        next_state_values = torch.zeros(self.batch_size, device=self.device)
+        next_state_values = torch.zeros(sample_n, device=self.device)
         
         if non_final_next_states:
             non_final_next_images = torch.stack([s[0] for s in non_final_next_states]).to(self.device)
