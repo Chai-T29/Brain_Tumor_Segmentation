@@ -225,3 +225,131 @@ class TumorLocalizationEnv:
             boxes[i] = torch.tensor([x_min, y_min, w, h], device=self.device)
             has_tumor[i] = True
         return boxes, has_tumor
+
+    # ------------------------------------------------------------------
+    # Oracle-style helpers (operate in the same coordinate system as images)
+    # ------------------------------------------------------------------
+    @torch.no_grad()
+    def _candidate_boxes_all_actions(self) -> torch.Tensor:
+        """Return candidate boxes for all 8 non-stop actions, shape (B, 8, 4).
+        Actions are center-anchored and symmetric:
+          0: right, 1: left, 2: up, 3: down,
+          4: scale up, 5: scale down,
+          6: shrink top/bottom (wider), 7: shrink left/right (taller)
+        """
+        assert self.current_bboxes is not None and self.images is not None
+        x, y, w, h = self.current_bboxes.unbind(dim=1)
+
+        width_limit  = torch.as_tensor(self.images.size(-1), device=self.device, dtype=torch.float32)
+        height_limit = torch.as_tensor(self.images.size(-2), device=self.device, dtype=torch.float32)
+        step   = torch.full_like(x, self.step_size)
+        scale  = torch.full_like(x, self.scale_factor)
+        min_sz = torch.full_like(x, self.min_bbox_size)
+
+        # Current center
+        cx = x + w / 2
+        cy = y + h / 2
+
+        # 0: move right
+        cx0 = torch.minimum(cx + step, width_limit - w / 2);  cy0 = cy;  w0 = w;  h0 = h
+        x0 = torch.clamp(cx0 - w0 / 2, min=torch.zeros_like(cx0), max=width_limit - w0)
+        y0 = torch.clamp(cy0 - h0 / 2, min=torch.zeros_like(cy0), max=height_limit - h0)
+
+        # 1: move left
+        cx1 = torch.maximum(cx - step, w / 2);  cy1 = cy;  w1 = w;  h1 = h
+        x1 = torch.clamp(cx1 - w1 / 2, min=torch.zeros_like(cx1), max=width_limit - w1)
+        y1 = torch.clamp(cy1 - h1 / 2, min=torch.zeros_like(cy1), max=height_limit - h1)
+
+        # 2: move up
+        cx2 = cx;  cy2 = torch.maximum(cy - step, h / 2);  w2 = w;  h2 = h
+        x2 = torch.clamp(cx2 - w2 / 2, min=torch.zeros_like(cx2), max=width_limit - w2)
+        y2 = torch.clamp(cy2 - h2 / 2, min=torch.zeros_like(cy2), max=height_limit - h2)
+
+        # 3: move down
+        cx3 = cx;  cy3 = torch.minimum(cy + step, height_limit - h / 2);  w3 = w;  h3 = h
+        x3 = torch.clamp(cx3 - w3 / 2, min=torch.zeros_like(cx3), max=width_limit - w3)
+        y3 = torch.clamp(cy3 - h3 / 2, min=torch.zeros_like(cy3), max=height_limit - h3)
+
+        # 4: scale up (expand symmetrically)
+        w4 = torch.clamp(w * scale, max=width_limit)
+        h4 = torch.clamp(h * scale, max=height_limit)
+        cx4 = torch.clamp(cx, min=w4 / 2, max=width_limit - w4 / 2)
+        cy4 = torch.clamp(cy, min=h4 / 2, max=height_limit - h4 / 2)
+        x4 = torch.clamp(cx4 - w4 / 2, min=torch.zeros_like(cx4), max=width_limit - w4)
+        y4 = torch.clamp(cy4 - h4 / 2, min=torch.zeros_like(cy4), max=height_limit - h4)
+
+        # 5: scale down (shrink symmetrically)
+        w5 = torch.clamp(w / scale, min=min_sz)
+        h5 = torch.clamp(h / scale, min=min_sz)
+        cx5 = torch.clamp(cx, min=w5 / 2, max=width_limit - w5 / 2)
+        cy5 = torch.clamp(cy, min=h5 / 2, max=height_limit - h5 / 2)
+        x5 = torch.clamp(cx5 - w5 / 2, min=torch.zeros_like(cx5), max=width_limit - w5)
+        y5 = torch.clamp(cy5 - h5 / 2, min=torch.zeros_like(cy5), max=height_limit - h5)
+
+        # 6: shrink top/bottom (reduce height, increase width)
+        w6 = torch.clamp(w * scale, max=width_limit)
+        h6 = torch.clamp(h / scale, min=min_sz)
+        cx6 = torch.clamp(cx, min=w6 / 2, max=width_limit - w6 / 2)
+        cy6 = torch.clamp(cy, min=h6 / 2, max=height_limit - h6 / 2)
+        x6 = torch.clamp(cx6 - w6 / 2, min=torch.zeros_like(cx6), max=width_limit - w6)
+        y6 = torch.clamp(cy6 - h6 / 2, min=torch.zeros_like(cy6), max=height_limit - h6)
+
+        # 7: shrink left/right (reduce width, increase height)
+        w7 = torch.clamp(w / scale, min=min_sz)
+        h7 = torch.clamp(h * scale, max=height_limit)
+        cx7 = torch.clamp(cx, min=w7 / 2, max=width_limit - w7 / 2)
+        cy7 = torch.clamp(cy, min=h7 / 2, max=height_limit - h7 / 2)
+        x7 = torch.clamp(cx7 - w7 / 2, min=torch.zeros_like(cx7), max=width_limit - w7)
+        y7 = torch.clamp(cy7 - h7 / 2, min=torch.zeros_like(cy7), max=height_limit - h7)
+
+        c0 = torch.stack([x0, y0, w0, h0], dim=1)
+        c1 = torch.stack([x1, y1, w1, h1], dim=1)
+        c2 = torch.stack([x2, y2, w2, h2], dim=1)
+        c3 = torch.stack([x3, y3, w3, h3], dim=1)
+        c4 = torch.stack([x4, y4, w4, h4], dim=1)
+        c5 = torch.stack([x5, y5, w5, h5], dim=1)
+        c6 = torch.stack([x6, y6, w6, h6], dim=1)
+        c7 = torch.stack([x7, y7, w7, h7], dim=1)
+        return torch.stack([c0, c1, c2, c3, c4, c5, c6, c7], dim=1)  # (B, 8, 4)
+
+    @torch.no_grad()
+    def _iou_candidates(self, cand: torch.Tensor) -> torch.Tensor:
+        """Compute IoU for all candidate boxes vs GT. cand: (B, 8, 4) -> (B, 8)."""
+        gt = self.gt_bboxes
+        x1, y1, w1, h1 = cand.unbind(dim=2)
+        x2, y2, w2, h2 = gt[:, 0:1], gt[:, 1:2], gt[:, 2:3], gt[:, 3:4]
+
+        x1e = x1 + w1; y1e = y1 + h1
+        x2e = x2 + w2; y2e = y2 + h2
+
+        inter_w = torch.clamp(torch.minimum(x1e, x2e) - torch.maximum(x1, x2), min=0.0)
+        inter_h = torch.clamp(torch.minimum(y1e, y2e) - torch.maximum(y1, y2), min=0.0)
+        inter = inter_w * inter_h
+
+        area1 = torch.clamp(w1, min=0.0) * torch.clamp(h1, min=0.0)
+        area2 = torch.clamp(w2, min=0.0) * torch.clamp(h2, min=0.0)
+        union = area1 + area2 - inter
+        return torch.where(union > 0, inter / union, torch.zeros_like(union))
+
+    @torch.no_grad()
+    def positive_actions_mask(self, eps: float = 1e-6) -> torch.Tensor:
+        """Return boolean mask (B, 8) of which actions improve IoU."""
+        cand = self._candidate_boxes_all_actions()
+        iou_new = self._iou_candidates(cand)
+        cur = self.last_iou.unsqueeze(1)
+        pos = (iou_new - cur) > eps
+        if self.has_tumor is not None:
+            pos = pos & self.has_tumor.view(-1, 1)
+        if self.active_mask is not None:
+            pos = pos & self.active_mask.view(-1, 1)
+        return pos
+
+    @torch.no_grad()
+    def best_action_by_iou(self, include_stop: bool = True) -> torch.Tensor:
+        """Return argmax IoU action per env. If include_stop=True, STOP (8) is allowed."""
+        cand = self._candidate_boxes_all_actions()
+        if include_stop:
+            cur = self.current_bboxes.unsqueeze(1)  # STOP corresponds to "keep current box"
+            cand = torch.cat([cand, cur], dim=1)    # now shape (B, 9, 4); index 8 == STOP
+        ious = self._iou_candidates(cand)
+        return ious.argmax(dim=1)
