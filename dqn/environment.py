@@ -53,6 +53,7 @@ class TumorLocalizationEnv:
         self._original_width: Optional[float] = None
         self._scale_x: Optional[float] = None
         self._scale_y: Optional[float] = None
+        self._resized_images: Optional[torch.Tensor] = None
 
     @property
     def device(self) -> torch.device:
@@ -68,6 +69,12 @@ class TumorLocalizationEnv:
 
         self.images = images.detach()
         self.masks = masks.detach()
+        self._resized_images = F.interpolate(
+            self.images,
+            size=self.resize_shape,
+            mode="bilinear",
+            align_corners=False,
+        ).detach()
         batch_size = images.size(0)
         height = images.size(-2)
         width = images.size(-1)
@@ -189,10 +196,9 @@ class TumorLocalizationEnv:
     # Helpers
     # ------------------------------------------------------------------
     def _get_state(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        if self.images is None or self.current_bboxes is None:
+        if self._resized_images is None or self.current_bboxes is None:
             raise RuntimeError("Environment must be reset before retrieving state.")
-        resized_images = F.interpolate(self.images, size=self.resize_shape, mode="bilinear", align_corners=False)
-        return resized_images.detach(), self.current_bboxes.detach()
+        return self._resized_images.detach(), self.current_bboxes.detach()
 
     def _initialise_bboxes(self, height: int, width: int) -> torch.Tensor:
         if self.gt_bboxes is None or self.has_tumor is None:
