@@ -404,8 +404,16 @@ class TumorLocalizationEnv:
         # Recompute x/y from center
         x_new = cx - w_new / 2
         y_new = cy - h_new / 2
-        x_new = torch.clamp(x_new, min=0.0, max=width_limit - w_new)
-        y_new = torch.clamp(y_new, min=0.0, max=height_limit - h_new)
+        x_new = torch.clamp(
+            x_new,
+            min=torch.zeros_like(x_new),
+            max=width_limit - w_new,
+        )
+        y_new = torch.clamp(
+            y_new,
+            min=torch.zeros_like(y_new),
+            max=height_limit - h_new,
+        )
 
         updated_unscaled = torch.stack((x_new, y_new, w_new, h_new), dim=1)
         updated_scaled = self._scale_bboxes_to_resize(updated_unscaled)
@@ -566,64 +574,128 @@ class TumorLocalizationEnv:
         cy0 = cy
         w0 = w
         h0 = h
-        x0 = torch.clamp(cx0 - w0/2, min=0.0, max=width_limit - w0)
-        y0 = torch.clamp(cy0 - h0/2, min=0.0, max=height_limit - h0)
+        x0 = torch.clamp(
+            cx0 - w0/2,
+            min=torch.zeros_like(cx0),
+            max=width_limit - w0,
+        )
+        y0 = torch.clamp(
+            cy0 - h0/2,
+            min=torch.zeros_like(cy0),
+            max=height_limit - h0,
+        )
 
         # 1: move left
         cx1 = torch.maximum(cx - step, w/2)
         cy1 = cy
         w1 = w
         h1 = h
-        x1 = torch.clamp(cx1 - w1/2, min=0.0, max=width_limit - w1)
-        y1 = torch.clamp(cy1 - h1/2, min=0.0, max=height_limit - h1)
+        x1 = torch.clamp(
+            cx1 - w1/2,
+            min=torch.zeros_like(cx1),
+            max=width_limit - w1,
+        )
+        y1 = torch.clamp(
+            cy1 - h1/2,
+            min=torch.zeros_like(cy1),
+            max=height_limit - h1,
+        )
 
         # 2: move up
         cx2 = cx
         cy2 = torch.maximum(cy - step, h/2)
         w2 = w
         h2 = h
-        x2 = torch.clamp(cx2 - w2/2, min=0.0, max=width_limit - w2)
-        y2 = torch.clamp(cy2 - h2/2, min=0.0, max=height_limit - h2)
+        x2 = torch.clamp(
+            cx2 - w2/2,
+            min=torch.zeros_like(cx2),
+            max=width_limit - w2,
+        )
+        y2 = torch.clamp(
+            cy2 - h2/2,
+            min=torch.zeros_like(cy2),
+            max=height_limit - h2,
+        )
 
         # 3: move down
         cx3 = cx
         cy3 = torch.minimum(cy + step, height_limit - h/2)
         w3 = w
         h3 = h
-        x3 = torch.clamp(cx3 - w3/2, min=0.0, max=width_limit - w3)
-        y3 = torch.clamp(cy3 - h3/2, min=0.0, max=height_limit - h3)
+        x3 = torch.clamp(
+            cx3 - w3/2,
+            min=torch.zeros_like(cx3),
+            max=width_limit - w3,
+        )
+        y3 = torch.clamp(
+            cy3 - h3/2,
+            min=torch.zeros_like(cy3),
+            max=height_limit - h3,
+        )
 
         # 4: scale up (expand symmetrically)
         w4 = torch.clamp(w * scale, max=width_limit)
         h4 = torch.clamp(h * scale, max=height_limit)
         cx4 = torch.clamp(cx, min=w4/2, max=width_limit - w4/2)
         cy4 = torch.clamp(cy, min=h4/2, max=height_limit - h4/2)
-        x4 = torch.clamp(cx4 - w4/2, min=0.0, max=width_limit - w4)
-        y4 = torch.clamp(cy4 - h4/2, min=0.0, max=height_limit - h4)
+        x4 = torch.clamp(
+            cx4 - w4/2,
+            min=torch.zeros_like(cx4),
+            max=width_limit - w4,
+        )
+        y4 = torch.clamp(
+            cy4 - h4/2,
+            min=torch.zeros_like(cy4),
+            max=height_limit - h4,
+        )
 
         # 5: scale down (shrink symmetrically)
         w5 = torch.clamp(w / scale, min=min_sz)
         h5 = torch.clamp(h / scale, min=min_sz)
         cx5 = torch.clamp(cx, min=w5/2, max=width_limit - w5/2)
         cy5 = torch.clamp(cy, min=h5/2, max=height_limit - h5/2)
-        x5 = torch.clamp(cx5 - w5/2, min=0.0, max=width_limit - w5)
-        y5 = torch.clamp(cy5 - h5/2, min=0.0, max=height_limit - h5)
+        x5 = torch.clamp(
+            cx5 - w5/2,
+            min=torch.zeros_like(cx5),
+            max=width_limit - w5,
+        )
+        y5 = torch.clamp(
+            cy5 - h5/2,
+            min=torch.zeros_like(cy5),
+            max=height_limit - h5,
+        )
 
         # 6: shrink top/bottom (reduce height, increase width)
         w6 = torch.clamp(w * scale, max=width_limit)
         h6 = torch.clamp(h / scale, min=min_sz)
         cx6 = torch.clamp(cx, min=w6/2, max=width_limit - w6/2)
         cy6 = torch.clamp(cy, min=h6/2, max=height_limit - h6/2)
-        x6 = torch.clamp(cx6 - w6/2, min=0.0, max=width_limit - w6)
-        y6 = torch.clamp(cy6 - h6/2, min=0.0, max=height_limit - h6)
+        x6 = torch.clamp(
+            cx6 - w6/2,
+            min=torch.zeros_like(cx6),
+            max=width_limit - w6,
+        )
+        y6 = torch.clamp(
+            cy6 - h6/2,
+            min=torch.zeros_like(cy6),
+            max=height_limit - h6,
+        )
 
         # 7: shrink left/right (reduce width, increase height)
         w7 = torch.clamp(w / scale, min=min_sz)
         h7 = torch.clamp(h * scale, max=height_limit)
         cx7 = torch.clamp(cx, min=w7/2, max=width_limit - w7/2)
         cy7 = torch.clamp(cy, min=h7/2, max=height_limit - h7/2)
-        x7 = torch.clamp(cx7 - w7/2, min=0.0, max=width_limit - w7)
-        y7 = torch.clamp(cy7 - h7/2, min=0.0, max=height_limit - h7)
+        x7 = torch.clamp(
+            cx7 - w7/2,
+            min=torch.zeros_like(cx7),
+            max=width_limit - w7,
+        )
+        y7 = torch.clamp(
+            cy7 - h7/2,
+            min=torch.zeros_like(cy7),
+            max=height_limit - h7,
+        )
 
         c0 = torch.stack([x0, y0, w0, h0], dim=1)
         c1 = torch.stack([x1, y1, w1, h1], dim=1)
