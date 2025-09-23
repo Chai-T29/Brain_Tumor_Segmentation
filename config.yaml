@@ -24,7 +24,7 @@ training:
   max_epochs: 50
 
 environment:
-  iou_threshold: 0.8
+  iou_threshold: 0.85
 
 logging:
   log_dir: "lightning_logs"

@@ -78,54 +78,53 @@ class DQNAgent:
             buffer.popleft()
 
     def select_action(self, state, env, greedy: bool = False) -> torch.Tensor:
-        """Selects actions for a batch of states using an epsilon-greedy policy."""
         image, bbox = state
-        if image.dim() == 3:
-            image = image.unsqueeze(0)
-        if bbox.dim() == 1:
-            bbox = bbox.unsqueeze(0)
+        if image.dim()==3: image=image.unsqueeze(0)
+        if bbox.dim()==1:  bbox=bbox.unsqueeze(0)
 
-        batch_size = image.size(0)
-        image = image.to(self.device)
-        bbox = bbox.to(self.device)
+        B = image.size(0)
+        image = image.to(self.device); bbox = bbox.to(self.device)
 
         with torch.no_grad():
-            q_values = self.policy_net(image, bbox)
-            greedy_actions = q_values.argmax(dim=1)
+            q = self.policy_net(image, bbox)
+            greedy_actions = q.argmax(dim=1)  # (B,)
 
         if greedy:
             return greedy_actions.detach()
-        
-        # Moving towards positive IOU values in exploration
-        selected_actions = []
-        for i in range(batch_size):
-            if torch.rand(1).item() < self.current_epsilon:
-                # guided exploration
-                positive_actions = env._get_positive_actions(i)
-                if positive_actions:
-                    action = torch.tensor(
-                        random.choice(positive_actions),
-                        device=self.device
-                    )
+
+        # Which rows explore this step?
+        explore_mask = torch.rand(B, device=self.device) < self.current_epsilon
+
+        # Fast path: nobody explores
+        if not explore_mask.any():
+            actions = greedy_actions
+        else:
+            # Compute positive mask only when needed, vectorized
+            pos_mask = env.positive_actions_mask()  # (B,8)
+            best_by_iou = env.best_action_by_iou(include_stop=True)  # (B,)
+
+            actions = greedy_actions.clone()
+            idx = torch.nonzero(explore_mask, as_tuple=False).squeeze(1)
+            for i in idx.tolist():
+                if env.has_tumor is not None and not bool(env.has_tumor[i]):
+                    a = env._STOP_ACTION
                 else:
-                    # fallback: uniform random
-                    action = torch.randint(0, self.num_actions, (1,), device=self.device)
-            else:
-                action = greedy_actions[i]
-            selected_actions.append(action)
+                    # candidates that are positive for this row
+                    pos_idx = torch.nonzero(pos_mask[i], as_tuple=False).squeeze(1)
+                    if pos_idx.numel() > 0:
+                        # uniform among positive actions
+                        j = torch.randint(0, pos_idx.numel(), (1,), device=self.device)
+                        a = pos_idx[j].item()
+                    else:
+                        # fallback: best IoU in one step (incl STOP)
+                        a = int(best_by_iou[i].item())
+                actions[i] = a
 
-        selected_actions = torch.stack(selected_actions)
-        # Old methodology
-        # random_mask = torch.rand(batch_size, device=self.device) < self.current_epsilon
-        # random_actions = torch.randint(0, self.num_actions, (batch_size,), device=self.device)
-        # selected_actions = torch.where(random_mask, random_actions, greedy_actions)
-
-        #self.current_epsilon = max(self.epsilon_end, self.current_epsilon * self._step_decay)
+        # epsilon decay
         self.global_step += 1
-        fraction = min(1.0, self.global_step / self.epsilon_decay)
-        # exponential decay between start and end
-        self.current_epsilon = self.epsilon_end + (self.epsilon_start - self.epsilon_end) * ((1 - fraction) ** 3)
-        return selected_actions.detach()
+        frac = min(1.0, self.global_step / self.epsilon_decay)
+        self.current_epsilon = self.epsilon_end + (self.epsilon_start - self.epsilon_end) * ((1 - frac) ** 3)
+        return actions.detach()
 
     def compute_loss(self) -> Optional[torch.Tensor]:
         """Computes the DQN loss without performing an optimization step."""

@@ -1,17 +1,10 @@
 from typing import ClassVar, Dict, Optional, Tuple
-
 import torch
 import torch.nn.functional as F
 
 
 class TumorLocalizationEnv:
-    """Vectorized environment for batched tumor localization.
-
-    The environment clips rewards to :data:`REWARD_CLIP_RANGE` to stabilise DQN
-    targets.  Downstream losses should therefore expect shaped rewards in the
-    range specified by the class attribute (``[-6.0, 6.0]`` by default) after all
-    bonuses and penalties are applied.
-    """
+    """Vectorized environment for batched tumor localization."""
 
     REWARD_CLIP_RANGE: ClassVar[Tuple[float, float]] = (-6.0, 6.0)
     STOP_REWARD_SUCCESS: ClassVar[float] = 4.0
@@ -68,8 +61,6 @@ class TumorLocalizationEnv:
         return self.images.device
 
     def reset(self, images: torch.Tensor, masks: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Initialise a new batch of environments for the provided data."""
-
         if images.dim() != 4 or masks.dim() != 4:
             raise ValueError("Images and masks must be batched tensors with shape [B, C, H, W].")
         if images.size(0) != masks.size(0):
@@ -81,25 +72,17 @@ class TumorLocalizationEnv:
         height = images.size(-2)
         width = images.size(-1)
 
-        # Compute ground-truth bounding boxes and tumor presence
         self.gt_bboxes, self.has_tumor = self._get_bbox_from_mask(self.masks)
 
-        # Save original size and compute scaling factors
         self._original_height = float(height)
         self._original_width = float(width)
         self._scale_y = self.resize_shape[0] / self._original_height
         self._scale_x = self.resize_shape[1] / self._original_width
 
-        # Initialise unscaled bounding boxes with chosen mode
         self.current_bboxes_unscaled = self._initialise_bboxes(height, width)
-
-        # Scale to resized coordinate system for state representation
         self.current_bboxes = self._scale_bboxes_to_resize(self.current_bboxes_unscaled)
-
-        # IoU is computed w.r.t unscaled GT boxes
         self.last_iou = self._calculate_iou(self.current_bboxes_unscaled, self.gt_bboxes)
 
-        # Step and activity tracking
         self.current_step = torch.zeros(batch_size, device=self.device, dtype=torch.long)
         self.active_mask = torch.ones(batch_size, device=self.device, dtype=torch.bool)
         self._threshold_reached = torch.zeros(batch_size, device=self.device, dtype=torch.bool)
@@ -531,28 +514,89 @@ class TumorLocalizationEnv:
 
         return boxes, has_tumor
     
-    def _get_positive_actions(self, index: int) -> list[int]:
-        """
-        Return the list of actions that improve IoU for the environment at batch index.
-        """
-        if self.images is None or self.gt_bboxes is None:
-            raise RuntimeError("Environment must be reset before querying positive actions.")
+    # ------------------------------------------------------------------
+    # New vectorized helpers
+    # ------------------------------------------------------------------
+    @torch.no_grad()
+    def _candidate_boxes_all_actions(self) -> torch.Tensor:
+        """Return candidate boxes for all actions, shape (B, 8, 4)."""
+        x, y, w, h = self.current_bboxes_unscaled.unbind(dim=1)
+        B = x.size(0)
 
-        positive_actions = []
-        current_box = self.current_bboxes_unscaled[index].unsqueeze(0)  # shape (1,4)
-        current_iou = self.last_iou[index].unsqueeze(0)
-        gt_box = self.gt_bboxes[index].unsqueeze(0)
+        width_limit = torch.tensor(self.images.size(-1), device=self.device, dtype=torch.float32)
+        height_limit = torch.tensor(self.images.size(-2), device=self.device, dtype=torch.float32)
+        step = torch.full_like(x, self.step_size)
+        scale = torch.full_like(x, self.scale_factor)
+        min_size = torch.full_like(x, self.min_bbox_size)
 
-        for action in range(self._STOP_ACTION + 1):  # loop over all actions
-            # simulate this action
-            test_actions = torch.tensor([action], device=self.device)
-            test_active = torch.tensor([True], device=self.device)
-            new_unscaled, _ = self._apply_action(test_actions, test_active)
+        # Moves
+        y_up = torch.clamp(y - step, min=0.0)
+        y_down = torch.clamp(y + step, max=torch.clamp(height_limit - h, min=0.0))
+        x_left = torch.clamp(x - step, min=0.0)
+        x_right = torch.clamp(x + step, max=torch.clamp(width_limit - w, min=0.0))
 
-            # compute IoU
-            new_iou = self._calculate_iou(new_unscaled, gt_box)
+        # Width changes
+        w_exp = torch.clamp(w * scale, max=width_limit)
+        w_shr = torch.clamp(w / scale, min=min_size)
+        # Height changes
+        h_exp = torch.clamp(h * scale, max=height_limit)
+        h_shr = torch.clamp(h / scale, min=min_size)
 
-            if new_iou.item() > current_iou.item():
-                positive_actions.append(action)
+        # Keep inside bounds
+        x_exp_ok = torch.clamp(x, min=0.0, max=torch.clamp(width_limit - w_exp, min=0.0))
+        y_exp_ok = torch.clamp(y, min=0.0, max=torch.clamp(height_limit - h_exp, min=0.0))
+        x_shr_ok = torch.clamp(x, min=0.0, max=torch.clamp(width_limit - w_shr, min=0.0))
+        y_shr_ok = torch.clamp(y, min=0.0, max=torch.clamp(height_limit - h_shr, min=0.0))
 
-        return positive_actions
+        c0 = torch.stack([x, y_up, w, h], dim=1)
+        c1 = torch.stack([x, y_down, w, h], dim=1)
+        c2 = torch.stack([x_left, y, w, h], dim=1)
+        c3 = torch.stack([x_right, y, w, h], dim=1)
+        c4 = torch.stack([x_exp_ok, y, w_exp, h], dim=1)
+        c5 = torch.stack([x_shr_ok, y, w_shr, h], dim=1)
+        c6 = torch.stack([x, y_exp_ok, w, h_exp], dim=1)
+        c7 = torch.stack([x, y_shr_ok, w, h_shr], dim=1)
+
+        return torch.stack([c0, c1, c2, c3, c4, c5, c6, c7], dim=1)
+
+    @torch.no_grad()
+    def _iou_candidates(self, cand: torch.Tensor) -> torch.Tensor:
+        """Compute IoU for all candidate boxes vs GT. cand: (B, 8, 4) -> (B, 8)."""
+        gt = self.gt_bboxes
+        x1, y1, w1, h1 = cand.unbind(dim=2)
+        x2, y2, w2, h2 = gt[:, 0:1], gt[:, 1:2], gt[:, 2:3], gt[:, 3:4]
+
+        x1e = x1 + w1; y1e = y1 + h1
+        x2e = x2 + w2; y2e = y2 + h2
+
+        inter_w = torch.clamp(torch.minimum(x1e, x2e) - torch.maximum(x1, x2), min=0.0)
+        inter_h = torch.clamp(torch.minimum(y1e, y2e) - torch.maximum(y1, y2), min=0.0)
+        inter = inter_w * inter_h
+
+        area1 = torch.clamp(w1, min=0.0) * torch.clamp(h1, min=0.0)
+        area2 = torch.clamp(w2, min=0.0) * torch.clamp(h2, min=0.0)
+        union = area1 + area2 - inter
+        return torch.where(union > 0, inter / union, torch.zeros_like(union))
+
+    @torch.no_grad()
+    def positive_actions_mask(self, eps: float = 1e-6) -> torch.Tensor:
+        """Return boolean mask (B, 8) of which actions improve IoU."""
+        cand = self._candidate_boxes_all_actions()
+        iou_new = self._iou_candidates(cand)
+        cur = self.last_iou.unsqueeze(1)
+        pos = (iou_new - cur) > eps
+        if self.has_tumor is not None:
+            pos = pos & self.has_tumor.view(-1, 1)
+        if self.active_mask is not None:
+            pos = pos & self.active_mask.view(-1, 1)
+        return pos
+
+    @torch.no_grad()
+    def best_action_by_iou(self, include_stop: bool = True) -> torch.Tensor:
+        """Return argmax IoU action per env. If include_stop=True, STOP (8) is allowed."""
+        cand = self._candidate_boxes_all_actions()
+        if include_stop:
+            cur = self.current_bboxes_unscaled.unsqueeze(1)
+            cand = torch.cat([cand, cur], dim=1)
+        ious = self._iou_candidates(cand)
+        return ious.argmax(dim=1)
