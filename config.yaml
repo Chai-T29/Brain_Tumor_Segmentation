@@ -23,9 +23,15 @@ training:
   seed: 42
   val_interval: 1
   max_epochs: 30
+  
+  # Action diversity parameters
+  action_history_size: 5      # Size of action history buffer for tracking diversity
+  movement_frequency: 3       # Force movement action every N zoom actions
+  diversity_penalty: 0.1      # Penalty for repeating same action too frequently
 
 environment:
   iou_threshold: 0.7
+  centering_reward_weight: 0.5  # Weight for centering reward component
 
 logging:
   log_dir: "lightning_logs"

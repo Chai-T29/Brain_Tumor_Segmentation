@@ -1,5 +1,6 @@
 from typing import ClassVar, Dict, Optional, Tuple
 import torch
+import numpy as np
 
 
 class TumorLocalizationEnv:
@@ -11,6 +12,7 @@ class TumorLocalizationEnv:
     STOP_REWARD_FALSE: ClassVar[float] = -3.0
     TIME_PENALTY: ClassVar[float] = 0.01
     HOLD_PENALTY: ClassVar[float] = 0.5
+    CENTERING_REWARD_WEIGHT: ClassVar[float] = 0.5  # Weight for centering reward
 
     _STOP_ACTION = 8
 
@@ -41,6 +43,7 @@ class TumorLocalizationEnv:
         self.gt_bboxes: Optional[torch.Tensor] = None
         self.current_bboxes: Optional[torch.Tensor] = None
         self.last_iou: Optional[torch.Tensor] = None
+        self.last_centering_score: Optional[torch.Tensor] = None
         self.current_step: Optional[torch.Tensor] = None
         self.active_mask: Optional[torch.Tensor] = None
         self.has_tumor: Optional[torch.Tensor] = None
@@ -65,6 +68,7 @@ class TumorLocalizationEnv:
         self.gt_bboxes, self.has_tumor = self._get_bbox_from_mask(self.masks)
         self.current_bboxes = self._initialise_bboxes(height, width)
         self.last_iou = self._calculate_iou(self.current_bboxes, self.gt_bboxes)
+        self.last_centering_score = self._calculate_centering_score(self.current_bboxes, self.gt_bboxes)
 
         self.current_step = torch.zeros(batch_size, device=self.device, dtype=torch.long)
         self.active_mask = torch.ones(batch_size, device=self.device, dtype=torch.bool)
@@ -95,21 +99,62 @@ class TumorLocalizationEnv:
         self.current_bboxes = self._apply_action(actions, prev_active)
 
         current_iou = self._calculate_iou(self.current_bboxes, self.gt_bboxes)
+        current_centering_score = self._calculate_centering_score(self.current_bboxes, self.gt_bboxes)
+        
         rewards, stop_mask, success_mask, threshold_hit = self._compute_rewards(
-            actions, prev_active, current_iou, prev_threshold_reached, timeout_mask
+            actions, prev_active, current_iou, current_centering_score, 
+            prev_threshold_reached, timeout_mask
         )
 
         done = stop_mask | timeout_mask
         self.active_mask = prev_active & ~done
         self.last_iou = torch.where(prev_active, current_iou, self.last_iou)
+        self.last_centering_score = torch.where(prev_active, current_centering_score, self.last_centering_score)
         updated_threshold = prev_threshold_reached | threshold_hit
         self._threshold_reached = torch.where(prev_active, updated_threshold, self._threshold_reached)
 
-        info = {"iou": current_iou.detach(), "success": success_mask.detach()}
+        info = {"iou": current_iou.detach(), "success": success_mask.detach(), 
+                "centering_score": current_centering_score.detach()}
         return self._get_state(), rewards.detach(), done.detach(), info
 
     def _get_state(self):
         return self.images.detach(), self.current_bboxes.detach()
+
+    def _calculate_centering_score(self, pred_boxes: torch.Tensor, gt_boxes: torch.Tensor) -> torch.Tensor:
+        """Calculate how well the predicted box center aligns with the ground truth box center.
+        
+        Args:
+            pred_boxes: Predicted bounding boxes [B, 4] in format [x, y, w, h]
+            gt_boxes: Ground truth bounding boxes [B, 4] in format [x, y, w, h]
+            
+        Returns:
+            Centering scores [B] where 1.0 is perfectly centered, 0.0 is maximally off-center
+        """
+        # Get centers of predicted and ground truth boxes
+        pred_cx = pred_boxes[:, 0] + pred_boxes[:, 2] / 2  # x + w/2
+        pred_cy = pred_boxes[:, 1] + pred_boxes[:, 3] / 2  # y + h/2
+        
+        gt_cx = gt_boxes[:, 0] + gt_boxes[:, 2] / 2
+        gt_cy = gt_boxes[:, 1] + gt_boxes[:, 3] / 2
+        
+        # Calculate distance between centers
+        center_dist = torch.sqrt((pred_cx - gt_cx) ** 2 + (pred_cy - gt_cy) ** 2)
+        
+        # Normalize by image diagonal (assuming square images for simplicity)
+        # This makes the score resolution-independent
+        image_diagonal = torch.sqrt(torch.tensor(self.images.size(-1) ** 2 + self.images.size(-2) ** 2, 
+                                                device=self.device, dtype=torch.float32))
+        
+        normalized_dist = center_dist / image_diagonal
+        
+        # Convert to score: 1.0 when perfectly centered, approaching 0 as distance increases
+        centering_score = torch.exp(-5 * normalized_dist)  # Exponential decay
+        
+        # Only apply centering score where there's actually a tumor
+        centering_score = torch.where(self.has_tumor, centering_score, 
+                                    torch.ones_like(centering_score))
+        
+        return centering_score
 
     def _initialise_bboxes(self, height: int, width: int) -> torch.Tensor:
         batch_size = self.gt_bboxes.size(0)
@@ -183,11 +228,19 @@ class TumorLocalizationEnv:
         y_new = cy - h_new / 2
         return torch.stack((x_new, y_new, w_new, h_new), dim=1)
 
-    def _compute_rewards(self, actions, prev_active, current_iou, prev_threshold_reached, timeout_mask):
-        if self.last_iou is None:
+    def _compute_rewards(self, actions, prev_active, current_iou, current_centering_score, 
+                        prev_threshold_reached, timeout_mask):
+        if self.last_iou is None or self.last_centering_score is None:
             raise RuntimeError("reset before rewards.")
+            
         delta_iou = torch.where(prev_active, current_iou - self.last_iou, torch.zeros_like(current_iou))
-        rewards = 2.5 * delta_iou + 0.5 * torch.where(prev_active, current_iou, torch.zeros_like(current_iou))
+        delta_centering = torch.where(prev_active, current_centering_score - self.last_centering_score, 
+                                     torch.zeros_like(current_centering_score))
+        
+        # Main reward: IoU improvement + current IoU + centering improvement
+        rewards = (2.5 * delta_iou + 
+                  0.5 * torch.where(prev_active, current_iou, torch.zeros_like(current_iou)) +
+                  self.CENTERING_REWARD_WEIGHT * delta_centering)
 
         stop_mask = (actions == self._STOP_ACTION) & prev_active
         tumor_present = self.has_tumor & prev_active
@@ -195,10 +248,12 @@ class TumorLocalizationEnv:
         threshold_hit = (current_iou >= self.iou_threshold) & tumor_present
         success_mask = stop_mask & threshold_hit
 
+        # Stopping rewards
         rewards += torch.where(success_mask, torch.full_like(rewards, self.STOP_REWARD_SUCCESS), 0)
         rewards += torch.where(stop_mask & no_tumor, torch.full_like(rewards, self.STOP_REWARD_NO_TUMOR), 0)
         rewards += torch.where(stop_mask & tumor_present & ~threshold_hit, torch.full_like(rewards, self.STOP_REWARD_FALSE), 0)
 
+        # Time and holding penalties
         time_penalty_mask = prev_active & ~stop_mask & ~(no_tumor | success_mask)
         rewards -= torch.where(time_penalty_mask, torch.full_like(rewards, self.TIME_PENALTY), 0)
         rewards -= torch.where((~stop_mask) & no_tumor, torch.full_like(rewards, self.HOLD_PENALTY), 0)
@@ -353,3 +408,37 @@ class TumorLocalizationEnv:
             cand = torch.cat([cand, cur], dim=1)    # now shape (B, 9, 4); index 8 == STOP
         ious = self._iou_candidates(cand)
         return ious.argmax(dim=1)
+
+    def render(self, index: int = 0, mode: str = "rgb_array"):
+        """Simple rendering function for visualization (placeholder implementation)."""
+        if mode == "rgb_array":
+            # Convert grayscale image to RGB for visualization
+            image = self.images[index, 0].cpu().numpy()  # (H, W)
+            # Normalize to 0-255
+            image = ((image - image.min()) / (image.max() - image.min() + 1e-8) * 255).astype('uint8')
+            # Convert to RGB
+            rgb_image = np.stack([image, image, image], axis=-1)  # (H, W, 3)
+            
+            # Draw current bounding box in red
+            bbox = self.current_bboxes[index].cpu().numpy()
+            x, y, w, h = bbox.astype(int)
+            
+            # Simple box drawing (just outline)
+            rgb_image[y:y+2, x:x+int(w)] = [255, 0, 0]  # top
+            rgb_image[y+int(h)-2:y+int(h), x:x+int(w)] = [255, 0, 0]  # bottom
+            rgb_image[y:y+int(h), x:x+2] = [255, 0, 0]  # left
+            rgb_image[y:y+int(h), x+int(w)-2:x+int(w)] = [255, 0, 0]  # right
+            
+            # Draw ground truth bounding box in green if tumor exists
+            if self.has_tumor[index]:
+                gt_bbox = self.gt_bboxes[index].cpu().numpy()
+                gt_x, gt_y, gt_w, gt_h = gt_bbox.astype(int)
+                
+                rgb_image[gt_y:gt_y+2, gt_x:gt_x+int(gt_w)] = [0, 255, 0]  # top
+                rgb_image[gt_y+int(gt_h)-2:gt_y+int(gt_h), gt_x:gt_x+int(gt_w)] = [0, 255, 0]  # bottom
+                rgb_image[gt_y:gt_y+int(gt_h), gt_x:gt_x+2] = [0, 255, 0]  # left
+                rgb_image[gt_y:gt_y+int(gt_h), gt_x+int(gt_w)-2:gt_x+int(gt_w)] = [0, 255, 0]  # right
+                
+            return rgb_image
+        else:
+            raise NotImplementedError(f"Render mode '{mode}' not supported")

@@ -23,6 +23,10 @@ class DQNAgent:
         memory_size: int = 10000,
         batch_size: int = 64,
         target_update: int = 10,
+        # New parameters for action diversity
+        action_history_size: int = 5,
+        movement_frequency: int = 3,  # Force movement every N zoom actions
+        diversity_penalty: float = 0.1,  # Penalty for repeating same action
     ) -> None:
         self.num_actions = num_actions
         self.gamma = gamma
@@ -42,11 +46,13 @@ class DQNAgent:
         self.n_step_buffers: Dict[int, deque] = defaultdict(lambda: deque(maxlen=self.n_step))
         self.beta = 0.4
         self.beta_increment_per_sampling = (1.0 - self.beta) / 100000
-        # if self.epsilon_start <= 0:
-        #     self._step_decay = 1.0
-        # else:
-        #     ratio = max(self.epsilon_end, 1e-12) / self.epsilon_start
-        #     self._step_decay = ratio ** (1.0 / self.epsilon_decay)
+        
+        # Action diversity tracking
+        self.action_history_size = action_history_size
+        self.movement_frequency = movement_frequency
+        self.diversity_penalty = diversity_penalty
+        self.action_history: Dict[int, deque] = defaultdict(lambda: deque(maxlen=action_history_size))
+        self.zoom_counters: Dict[int, int] = defaultdict(int)  # Track consecutive zoom actions
 
     @property
     def device(self) -> torch.device:
@@ -60,6 +66,39 @@ class DQNAgent:
             progress = min(max(episode_idx, 0), total_episodes - 1) / (total_episodes - 1)
         self.current_epsilon = self.epsilon_start - progress * (self.epsilon_start - self.epsilon_end)
 
+    def _is_zoom_action(self, action: int) -> bool:
+        """Check if action is a zoom action (scale up/down or shape changes)."""
+        return action in [4, 5, 6, 7]  # scale up, scale down, shrink top/bottom, shrink left/right
+    
+    def _is_movement_action(self, action: int) -> bool:
+        """Check if action is a movement action."""
+        return action in [0, 1, 2, 3]  # right, left, up, down
+
+    def _should_force_movement(self, env_idx: int) -> bool:
+        """Check if we should force a movement action for diversity."""
+        return self.zoom_counters[env_idx] >= self.movement_frequency
+
+    def _update_action_tracking(self, env_idx: int, action: int):
+        """Update action history and zoom counters."""
+        self.action_history[env_idx].append(action)
+        
+        if self._is_zoom_action(action):
+            self.zoom_counters[env_idx] += 1
+        elif self._is_movement_action(action):
+            self.zoom_counters[env_idx] = 0  # Reset zoom counter after movement
+
+    def _get_diversity_penalty(self, env_idx: int, action: int) -> float:
+        """Calculate penalty for repeating actions too frequently."""
+        if len(self.action_history[env_idx]) < 2:
+            return 0.0
+        
+        recent_actions = list(self.action_history[env_idx])
+        same_action_count = sum(1 for a in recent_actions[-3:] if a == action)  # Check last 3 actions
+        
+        if same_action_count >= 2:  # If action appears 2+ times in last 3 actions
+            return self.diversity_penalty * same_action_count
+        return 0.0
+
     def push_experience(self, state, action, reward, next_state, done, env_idx: int) -> None:
         buffer = self.n_step_buffers[env_idx]
         buffer.append((state, action, reward, next_state, done))
@@ -71,6 +110,9 @@ class DQNAgent:
                 self.memory.push(*aggregated)
                 buffer.popleft()
             buffer.clear()
+            # Reset tracking for this environment
+            self.action_history[env_idx].clear()
+            self.zoom_counters[env_idx] = 0
         elif len(buffer) == self.n_step:
             transition = list(buffer)
             aggregated = self._aggregate_n_step(transition)
@@ -127,6 +169,9 @@ class DQNAgent:
             greedy_actions = q.argmax(dim=1)  # (B,)
 
         if greedy:
+            # Even in greedy mode, track actions for consistency
+            for i in range(B):
+                self._update_action_tracking(i, int(greedy_actions[i].item()))
             return greedy_actions.detach()
 
         # Which rows explore this step?
@@ -146,16 +191,41 @@ class DQNAgent:
                 if env.has_tumor is not None and not bool(env.has_tumor[i]):
                     a = env._STOP_ACTION
                 else:
-                    # candidates that are positive for this row
-                    pos_idx = torch.nonzero(pos_mask[i], as_tuple=False).squeeze(1)
-                    if pos_idx.numel() > 0:
-                        # uniform among positive actions
-                        j = torch.randint(0, pos_idx.numel(), (1,), device=self.device)
-                        a = pos_idx[j].item()
+                    # Check if we should force movement for diversity
+                    if self._should_force_movement(i):
+                        # Force a movement action
+                        movement_actions = [0, 1, 2, 3]  # right, left, up, down
+                        # Filter for positive movement actions if possible
+                        pos_movements = [act for act in movement_actions if pos_mask[i][act]]
+                        if pos_movements:
+                            a = random.choice(pos_movements)
+                        else:
+                            a = random.choice(movement_actions)
                     else:
-                        # fallback: best IoU in one step (incl STOP)
-                        a = int(best_by_iou[i].item())
+                        # Normal exploration logic with diversity consideration
+                        pos_idx = torch.nonzero(pos_mask[i], as_tuple=False).squeeze(1)
+                        if pos_idx.numel() > 0:
+                            # Filter out recently used actions to encourage diversity
+                            available_actions = []
+                            for act_idx in pos_idx.tolist():
+                                penalty = self._get_diversity_penalty(i, act_idx)
+                                if penalty == 0.0 or random.random() > penalty:
+                                    available_actions.append(act_idx)
+                            
+                            if available_actions:
+                                a = random.choice(available_actions)
+                            else:
+                                # Fallback to any positive action if all have penalties
+                                j = torch.randint(0, pos_idx.numel(), (1,), device=self.device)
+                                a = pos_idx[j].item()
+                        else:
+                            # fallback: best IoU in one step (incl STOP)
+                            a = int(best_by_iou[i].item())
                 actions[i] = a
+
+        # Update action tracking for all environments
+        for i in range(B):
+            self._update_action_tracking(i, int(actions[i].item()))
 
         # epsilon decay
         self.global_step += 1
@@ -199,15 +269,6 @@ class DQNAgent:
                 non_final_next_states.append(next_state)
 
         non_final_mask = torch.tensor(non_final_mask_list, device=self.device, dtype=torch.bool)
-
-        # Standard DQN Setup
-        # next_state_values = torch.zeros(self.batch_size, device=self.device)
-        # if non_final_next_states:
-        #     non_final_next_images = torch.stack([s[0] for s in non_final_next_states]).to(self.device)
-        #     non_final_next_bboxes = torch.stack([s[1] for s in non_final_next_states]).to(self.device)
-        #     next_state_values[non_final_mask] = (
-        #         self.target_net(non_final_next_images, non_final_next_bboxes).max(1)[0].detach()
-        #     )
 
         # Double-DQN Setup (reduces overestimation bias)
         next_state_values = torch.zeros(sample_n, device=self.device)

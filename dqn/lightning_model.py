@@ -34,6 +34,11 @@ class DQNLightning(pl.LightningModule):
         test_gif_dir: str = "lightning_logs/test_gifs",
         test_gif_fps: int = 4,
         iou_threshold: float = 0.8,
+        centering_reward_weight: float = 0.5,
+        # New action diversity parameters
+        action_history_size: int = 5,
+        movement_frequency: int = 3,
+        diversity_penalty: float = 0.1,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -55,21 +60,29 @@ class DQNLightning(pl.LightningModule):
             memory_size=self.hparams.memory_size,
             batch_size=self.hparams.batch_size,
             target_update=self.hparams.target_update,
+            action_history_size=self.hparams.action_history_size,
+            movement_frequency=self.hparams.movement_frequency,
+            diversity_penalty=self.hparams.diversity_penalty,
         )
 
-        self.train_env = TumorLocalizationEnv(max_steps=self.hparams.max_steps, iou_threshold=self.hparams.iou_threshold)
-        self.val_env = TumorLocalizationEnv(max_steps=self.hparams.max_steps, iou_threshold=self.hparams.iou_threshold)
-        self.test_env = TumorLocalizationEnv(max_steps=self.hparams.max_steps, iou_threshold=self.hparams.iou_threshold)
+        # Create environments with centering reward
+        env_kwargs = {
+            "max_steps": self.hparams.max_steps, 
+            "iou_threshold": self.hparams.iou_threshold
+        }
+        
+        self.train_env = TumorLocalizationEnv(**env_kwargs)
+        self.val_env = TumorLocalizationEnv(**env_kwargs)
+        self.test_env = TumorLocalizationEnv(**env_kwargs)
+        
+        # Override centering reward weight if provided
+        self.train_env.CENTERING_REWARD_WEIGHT = self.hparams.centering_reward_weight
+        self.val_env.CENTERING_REWARD_WEIGHT = self.hparams.centering_reward_weight
+        self.test_env.CENTERING_REWARD_WEIGHT = self.hparams.centering_reward_weight
 
         self._opt_steps = 0
         self._gif_output_dir = Path(self.hparams.test_gif_dir)
         self._test_episode_index = 0
-
-    # ------------------------------------------------------------------
-    # Training loop
-    # ------------------------------------------------------------------
-    # def on_train_epoch_start(self) -> None:
-    #     self.agent.set_episode_progress(self.current_epoch, getattr(self.trainer, "max_epochs", None))
 
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
         optimizer = self.optimizers()
@@ -86,13 +99,25 @@ class DQNLightning(pl.LightningModule):
         cumulative_rewards = torch.zeros(batch_size, device=self.device)
         steps_taken = torch.zeros(batch_size, device=self.device)
         iou_values = []
+        centering_values = []
         losses = []
         active_mask = torch.ones(batch_size, dtype=torch.bool, device=self.device)
         action_counts = torch.zeros(self.agent.num_actions, device=self.device)
+        
+        # Track action diversity metrics
+        movement_actions_count = torch.zeros(1, device=self.device)
+        zoom_actions_count = torch.zeros(1, device=self.device)
 
-        for _ in range(self.hparams.max_steps):
+        for step in range(self.hparams.max_steps):
             actions = self.agent.select_action(state, self.train_env)
             next_state, rewards, done, info = self.train_env.step(actions)
+
+            # Track action types
+            for i, action in enumerate(actions):
+                if self.agent._is_movement_action(int(action.item())):
+                    movement_actions_count += 1
+                elif self.agent._is_zoom_action(int(action.item())):
+                    zoom_actions_count += 1
 
             action_counts += torch.bincount(
                 actions, minlength=self.agent.num_actions
@@ -103,6 +128,7 @@ class DQNLightning(pl.LightningModule):
             cumulative_rewards += rewards_device
             steps_taken += active_mask.float()
             iou_values.append(info["iou"].to(self.device))
+            centering_values.append(info["centering_score"].to(self.device))
 
             state_images_cpu = state[0].detach().cpu()
             state_bboxes_cpu = state[1].detach().cpu()
@@ -140,21 +166,31 @@ class DQNLightning(pl.LightningModule):
 
         episode_time = time.perf_counter() - start_time
 
+        # Calculate metrics
         mean_loss = torch.stack(losses).mean() if losses else torch.tensor(0.0, device=self.device)
         mean_iou = torch.cat(iou_values).mean() if iou_values else torch.tensor(0.0, device=self.device)
+        mean_centering = torch.cat(centering_values).mean() if centering_values else torch.tensor(0.0, device=self.device)
         avg_reward = cumulative_rewards.mean()
         avg_length = steps_taken.mean()
         step_time = episode_time / max(1.0, float(steps_taken.max().item()))
 
+        # Action diversity metrics
+        total_actions = movement_actions_count + zoom_actions_count
+        movement_ratio = movement_actions_count / max(1, total_actions) if total_actions > 0 else torch.tensor(0.0, device=self.device)
+
         epsilon_tensor = torch.tensor(self.agent.current_epsilon, device=self.device)
         step_time_tensor = torch.tensor(step_time, device=self.device)
 
+        # Enhanced logging
         self.log("train/episode_reward", avg_reward, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("train/episode_length", avg_length, on_epoch=True, sync_dist=True)
         self.log("train/loss", mean_loss, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("train/mean_iou", mean_iou, on_epoch=True, sync_dist=True)
+        self.log("train/mean_centering", mean_centering, on_epoch=True, sync_dist=True)
         self.log("train/epsilon", epsilon_tensor, on_epoch=True, sync_dist=True)
         self.log("train/step_time_sec", step_time_tensor, on_epoch=True, sync_dist=True)
+        self.log("train/movement_ratio", movement_ratio, on_epoch=True, sync_dist=True)
+        
         self._log_action_distribution(action_counts, prefix="train_action_counts")
 
         return mean_loss
@@ -174,9 +210,6 @@ class DQNLightning(pl.LightningModule):
         current_lr = optimizer.param_groups[0]["lr"]
         self.log("train/lr", torch.tensor(current_lr, device=self.device), on_epoch=True, sync_dist=True)
 
-    # ------------------------------------------------------------------
-    # Validation & testing helpers
-    # ------------------------------------------------------------------
     def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
         metrics, _ = self._simulate_environment(self.val_env, batch, greedy=True, record=False)
         self._log_metrics(metrics, prefix="val")
@@ -196,41 +229,20 @@ class DQNLightning(pl.LightningModule):
         )
         self._log_metrics(metrics, prefix="test")
 
-        action_counts = np.zeros(9)
         if record and frames:
             reward_value = metrics["avg_reward"].item()
-            gif_name = f"episode_{self._test_episode_index:03d}_reward_{reward_value:.2f}.gif"
+            movement_ratio = metrics.get("movement_ratio", torch.tensor(0.0)).item()
+            gif_name = f"episode_{self._test_episode_index:03d}_reward_{reward_value:.2f}_mvmt_{movement_ratio:.2f}.gif"
             imageio.mimsave(self._gif_output_dir / gif_name, frames, fps=self.hparams.test_gif_fps)
             self._test_episode_index += 1
 
-            action_counts = action_counts + metrics["action_counts"].cpu().numpy()
-
-        # Generate and save histogram of action counts
-        plt.figure(figsize=(8, 6))
-        plt.bar(range(len(action_counts)), action_counts)
-        plt.xlabel("Action")
-        plt.ylabel("Frequency")
-        plt.title("Action Counts Histogram")
-        plt.tight_layout()
-        hist_dir = self._gif_output_dir.parent
-        hist_dir.mkdir(parents=True, exist_ok=True)
-        hist_filename = hist_dir / f"action_counts.png"
-        plt.savefig(hist_filename)
-        plt.close()
-
         return metrics
 
-    # ------------------------------------------------------------------
-    # Optimizers
-    # ------------------------------------------------------------------
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=self.hparams.lr)
         scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=self.hparams.lr_gamma)
         return [optimizer], [scheduler]
 
-    # ------------------------------------------------------------------
-    # Utilities
-    # ------------------------------------------------------------------
     def _simulate_environment(
         self,
         env: TumorLocalizationEnv,
@@ -246,9 +258,14 @@ class DQNLightning(pl.LightningModule):
         cumulative_rewards = torch.zeros(batch_size, device=self.device)
         steps_taken = torch.zeros(batch_size, device=self.device)
         iou_values = []
+        centering_values = []
         active_mask = torch.ones(batch_size, dtype=torch.bool, device=self.device)
         frames = []
         action_counts = torch.zeros(self.agent.num_actions, device=self.device)
+        
+        # Track action diversity
+        movement_actions_count = torch.zeros(1, device=self.device)
+        zoom_actions_count = torch.zeros(1, device=self.device)
 
         if record:
             frames.append(env.render(index=0, mode="rgb_array"))
@@ -256,6 +273,13 @@ class DQNLightning(pl.LightningModule):
         for _ in range(self.hparams.max_steps):
             actions = self.agent.select_action(state, env, greedy=greedy)
             next_state, rewards, done, info = env.step(actions)
+
+            # Track action types
+            for i, action in enumerate(actions):
+                if self.agent._is_movement_action(int(action.item())):
+                    movement_actions_count += 1
+                elif self.agent._is_zoom_action(int(action.item())):
+                    zoom_actions_count += 1
 
             action_counts += torch.bincount(
                 actions, minlength=self.agent.num_actions
@@ -265,6 +289,7 @@ class DQNLightning(pl.LightningModule):
             cumulative_rewards += rewards_device
             steps_taken += active_mask.float()
             iou_values.append(info["iou"].to(self.device))
+            centering_values.append(info["centering_score"].to(self.device))
 
             state = next_state
 
@@ -275,10 +300,16 @@ class DQNLightning(pl.LightningModule):
             if not active_mask.any():
                 break
 
+        # Calculate action diversity metrics
+        total_actions = movement_actions_count + zoom_actions_count
+        movement_ratio = movement_actions_count / max(1, total_actions) if total_actions > 0 else torch.tensor(0.0, device=self.device)
+
         metrics = {
             "avg_reward": cumulative_rewards.mean() if cumulative_rewards.numel() > 0 else torch.tensor(0.0, device=self.device),
             "episode_length": steps_taken.mean() if steps_taken.numel() > 0 else torch.tensor(0.0, device=self.device),
             "mean_iou": torch.cat(iou_values).mean() if iou_values else torch.tensor(0.0, device=self.device),
+            "mean_centering": torch.cat(centering_values).mean() if centering_values else torch.tensor(0.0, device=self.device),
+            "movement_ratio": movement_ratio,
             "action_counts": action_counts,
         }
         return metrics, frames if record else None
@@ -289,7 +320,8 @@ class DQNLightning(pl.LightningModule):
                 self._log_action_distribution(value, prefix=f"{prefix}/{name}")
                 continue
             log_name = f"{prefix}/{name}"
-            self.log(log_name, value, on_step=False, on_epoch=True, prog_bar=(name == "avg_reward"), sync_dist=True)
+            prog_bar = (name == "avg_reward")
+            self.log(log_name, value, on_step=False, on_epoch=True, prog_bar=prog_bar, sync_dist=True)
             if prefix == "val" and name == "avg_reward":
                 # Alias for checkpoint filename formatting
                 self.log("val_avg_reward", value, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
