@@ -138,8 +138,10 @@ class TumorLocalizationEnv:
             width_t  = torch.full((batch_size,), float(width),  device=self.device)
             height_t = torch.full((batch_size,), float(height), device=self.device)
 
-            w = torch.clamp(0.75 * width_t,  min=self.min_bbox_size, max=width_t)
-            h = torch.clamp(0.75 * height_t, min=self.min_bbox_size, max=height_t)
+            w = torch.clamp(0.75 * width_t, min=self.min_bbox_size)
+            w = torch.minimum(w, width_t)
+            h = torch.clamp(0.75 * height_t, min=self.min_bbox_size)
+            h = torch.minimum(h, height_t)
 
             corners = torch.randint(0, 4, (batch_size,), device=self.device)  # 0: TL, 1: TR, 2: BL, 3: BR
             x = torch.where((corners == 0) | (corners == 2), torch.zeros_like(w), width_t - w)
