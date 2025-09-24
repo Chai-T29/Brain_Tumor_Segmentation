@@ -1,10 +1,10 @@
 data:
   data_dir: "MU-Glioma-Post/"
-  batch_size: 24
+  batch_size: 32
   num_workers: 8
   persistent_workers: true
   pin_memory: true
-  prefetch_factor: 4
+  prefetch_factor: 3
   val_split: 0.3
   test_split: 0.1
   include_empty_masks: false
@@ -34,4 +34,4 @@ logging:
   test_gif_limit: 10
   test_gif_dir: "lightning_logs/test_gifs"
   test_gif_fps: 4
-  early_stopping_patience: 20
+  early_stopping_patience: 10

@@ -353,3 +353,53 @@ class TumorLocalizationEnv:
             cand = torch.cat([cand, cur], dim=1)    # now shape (B, 9, 4); index 8 == STOP
         ious = self._iou_candidates(cand)
         return ious.argmax(dim=1)
+    
+
+    def render(self, index: int = 0, mode: str = "human"):
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as patches
+        import numpy as np
+
+        if (
+            self.images is None
+            or self.current_bboxes is None
+            or self.gt_bboxes is None
+        ):
+            raise RuntimeError("Environment must be reset before rendering.")
+        if not 0 <= index < self.images.size(0):
+            raise IndexError("Render index out of range for current batch.")
+
+        image = self.images[index].detach().cpu()
+        image_np = image.permute(1, 2, 0).numpy()
+        min_val = float(image_np.min())
+        max_val = float(image_np.max())
+        if max_val > min_val:
+            image_np = (image_np - min_val) / (max_val - min_val)
+
+        fig, ax = plt.subplots(1)
+        ax.imshow(image_np, cmap="gray")
+
+        gt_x, gt_y, gt_w, gt_h = self.gt_bboxes[index].detach().cpu().tolist()
+        agent_x, agent_y, agent_w, agent_h = (
+            self.current_bboxes[index].detach().cpu().tolist()
+        )
+
+        gt_rect = patches.Rectangle((gt_x, gt_y), gt_w, gt_h, linewidth=2, edgecolor="g", facecolor="none", label="Ground Truth")
+        agent_rect = patches.Rectangle((agent_x, agent_y), agent_w, agent_h, linewidth=2, edgecolor="r", facecolor="none", label="Agent")
+        ax.add_patch(gt_rect)
+        ax.add_patch(agent_rect)
+        ax.legend()
+
+        if mode == "human":
+            plt.show()
+            plt.close(fig)
+            return None
+
+        if mode == "rgb_array":
+            fig.canvas.draw()
+            buf = fig.canvas.buffer_rgba()
+            data = np.asarray(buf)
+            plt.close(fig)
+            return data[:, :, :3]
+
+        raise ValueError(f"Unsupported render mode: {mode}")
