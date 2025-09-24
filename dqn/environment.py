@@ -381,14 +381,23 @@ class TumorLocalizationEnv:
         return pos
 
     @torch.no_grad()
-    def best_action_by_iou(self, include_stop: bool = True) -> torch.Tensor:
-        """Return argmax IoU action per env. If include_stop=True, STOP (8) is allowed."""
-        cand = self._candidate_boxes_all_actions()
+    def best_action_by_iou(self, include_stop: bool = True, eps: float = 1e-6) -> torch.Tensor:
+        """Return the best lookahead action by IoU.
+        If no non-stop action increases IoU over the current box by more than `eps`,
+        and `include_stop` is True, return STOP. Otherwise return the argmax among candidates.
+        """
+        assert self.last_iou is not None and self.current_bboxes is not None
+        # IoU of the 8 candidate (non-stop) actions
+        cand = self._candidate_boxes_all_actions()          # (B, 8, 4)
+        iou_new = self._iou_candidates(cand)                # (B, 8)
+        cur = self.last_iou                                 # (B,)
+        max_iou, max_idx = iou_new.max(dim=1)               # (B,), (B,)
+        no_improve = (max_iou - cur) <= eps
         if include_stop:
-            cur = self.current_bboxes.unsqueeze(1)  # STOP corresponds to "keep current box"
-            cand = torch.cat([cand, cur], dim=1)    # now shape (B, 9, 4); index 8 == STOP
-        ious = self._iou_candidates(cand)
-        return ious.argmax(dim=1)
+            stop_idx = torch.full_like(max_idx, self._STOP_ACTION)
+            return torch.where(no_improve, stop_idx, max_idx)
+        # If include_stop is False, just return the best candidate index (0..7)
+        return max_idx
     
 
     def render(self, index: int = 0, mode: str = "human"):
