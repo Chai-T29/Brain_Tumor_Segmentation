@@ -30,7 +30,7 @@ training:
   diversity_penalty: 0.1      # Penalty for repeating same action too frequently
 
 environment:
-  iou_threshold: 0.7
+  iou_threshold: 0.6
   centering_reward_weight: 0.5  # Weight for centering reward component
 
 logging:
