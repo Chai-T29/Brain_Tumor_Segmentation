@@ -26,6 +26,17 @@ training:
 
 environment:
   iou_threshold: 0.7
+  initial_mode: random_corners
+  step_size: 10.0
+  scale_factor: 1.1
+  min_bbox_size: 10.0
+  initial_margin: 8.0
+  reward_clip_range: [-6.0, 6.0]
+  stop_reward_success: 4.0
+  stop_reward_no_tumor: 2.0
+  stop_reward_false: -3.0
+  time_penalty: 0.01
+  hold_penalty: 0.5
 
 logging:
   log_dir: "lightning_logs"

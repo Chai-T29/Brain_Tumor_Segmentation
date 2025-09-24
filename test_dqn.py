@@ -7,8 +7,8 @@ import yaml
 
 import pytorch_lightning as pl
 from data.data_module import BrainTumorDataModule
-from dqn.environment import TumorLocalizationEnv
 from dqn.lightning_model import DQNLightning
+from dqn.environment import TumorLocalizationEnv
 
 
 def load_config(path: str) -> Dict:
@@ -98,6 +98,26 @@ def main():
         test_split=data_cfg.get("test_split", 0.1),
         seed=training_cfg.get("seed", 42),
     )
+
+    # Construct test environment from config and attach to model
+    env_common = dict(
+        max_steps=training_cfg.get("max_steps", 100),
+        iou_threshold=env_cfg.get("iou_threshold", 0.8),
+        step_size=env_cfg.get("step_size", 10.0),
+        scale_factor=env_cfg.get("scale_factor", 1.1),
+        min_bbox_size=env_cfg.get("min_bbox_size", 10.0),
+        initial_mode=env_cfg.get("initial_mode", "random_corners"),
+        initial_margin=env_cfg.get("initial_margin", 8.0),
+        reward_clip_range=tuple(env_cfg.get("reward_clip_range", [-6.0, 6.0])),
+        stop_reward_success=env_cfg.get("stop_reward_success", 4.0),
+        stop_reward_no_tumor=env_cfg.get("stop_reward_no_tumor", 2.0),
+        stop_reward_false=env_cfg.get("stop_reward_false", -3.0),
+        time_penalty=env_cfg.get("time_penalty", 0.01),
+        hold_penalty=env_cfg.get("hold_penalty", 0.5),
+    )
+    test_env = TumorLocalizationEnv(**env_common)
+    model.test_env = test_env
+
     trainer = pl.Trainer(
         accelerator="auto",
         devices="auto",

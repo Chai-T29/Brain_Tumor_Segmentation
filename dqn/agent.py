@@ -42,6 +42,8 @@ class DQNAgent:
         self.n_step_buffers: Dict[int, deque] = defaultdict(lambda: deque(maxlen=self.n_step))
         self.beta = 0.4
         self.beta_increment_per_sampling = (1.0 - self.beta) / 100000
+        # Per-environment episodic action counters: { id(env): {"episode_id": int, "counts": LongTensor[B, num_actions]} }
+        self._per_env_action_counts: Dict[int, Dict[str, torch.Tensor]] = {}
         # if self.epsilon_start <= 0:
         #     self._step_decay = 1.0
         # else:
@@ -129,6 +131,16 @@ class DQNAgent:
         if greedy:
             return greedy_actions.detach()
 
+        # Maintain per-episode action counts keyed by environment identity
+        env_key = id(env)
+        current_episode_id = getattr(env, "episode_id", None)
+        store = self._per_env_action_counts.get(env_key)
+        if (store is None) or (store.get("episode_id") != current_episode_id) or (store["counts"].size(0) != B):
+            counts = torch.zeros(B, self.num_actions, device=self.device, dtype=torch.long)
+            self._per_env_action_counts[env_key] = {"episode_id": current_episode_id, "counts": counts}
+        else:
+            counts = store["counts"]
+
         # Which rows explore this step?
         explore_mask = torch.rand(B, device=self.device) < self.current_epsilon
 
@@ -149,13 +161,21 @@ class DQNAgent:
                     # candidates that are positive for this row
                     pos_idx = torch.nonzero(pos_mask[i], as_tuple=False).squeeze(1)
                     if pos_idx.numel() > 0:
-                        # uniform among positive actions
-                        j = torch.randint(0, pos_idx.numel(), (1,), device=self.device)
-                        a = pos_idx[j].item()
+                        # Choose among positive actions the one used least so far this episode (tie-break uniformly)
+                        row_counts = self._per_env_action_counts[env_key]["counts"][i, pos_idx]
+                        min_count = row_counts.min()
+                        least_mask = (row_counts == min_count)
+                        least_idx = torch.nonzero(least_mask, as_tuple=False).squeeze(1)
+                        j = torch.randint(0, least_idx.numel(), (1,), device=self.device)
+                        a = int(pos_idx[least_idx[j]].item())
                     else:
                         # fallback: best IoU in one step (incl STOP)
                         a = int(best_by_iou[i].item())
                 actions[i] = a
+
+        # Update episodic action counters with the actions we just took
+        rows = torch.arange(B, device=self.device)
+        self._per_env_action_counts[env_key]["counts"][rows, actions] += 1
 
         # epsilon decay
         self.global_step += 1

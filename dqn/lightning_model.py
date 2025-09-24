@@ -34,6 +34,9 @@ class DQNLightning(pl.LightningModule):
         test_gif_dir: str = "lightning_logs/test_gifs",
         test_gif_fps: int = 4,
         iou_threshold: float = 0.8,
+        train_env: Optional[TumorLocalizationEnv] = None,
+        val_env: Optional[TumorLocalizationEnv] = None,
+        test_env: Optional[TumorLocalizationEnv] = None,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -57,9 +60,10 @@ class DQNLightning(pl.LightningModule):
             target_update=self.hparams.target_update,
         )
 
-        self.train_env = TumorLocalizationEnv(max_steps=self.hparams.max_steps, iou_threshold=self.hparams.iou_threshold)
-        self.val_env = TumorLocalizationEnv(max_steps=self.hparams.max_steps, iou_threshold=self.hparams.iou_threshold)
-        self.test_env = TumorLocalizationEnv(max_steps=self.hparams.max_steps, iou_threshold=self.hparams.iou_threshold)
+        # Use provided environments if given, otherwise create defaults
+        self.train_env = train_env or TumorLocalizationEnv(max_steps=self.hparams.max_steps, iou_threshold=self.hparams.iou_threshold)
+        self.val_env = val_env or TumorLocalizationEnv(max_steps=self.hparams.max_steps, iou_threshold=self.hparams.iou_threshold)
+        self.test_env = test_env or TumorLocalizationEnv(max_steps=self.hparams.max_steps, iou_threshold=self.hparams.iou_threshold)
 
         self._opt_steps = 0
         self._gif_output_dir = Path(self.hparams.test_gif_dir)

@@ -21,8 +21,14 @@ class TumorLocalizationEnv:
         step_size: float = 10.0,
         scale_factor: float = 1.1,
         min_bbox_size: float = 10.0,
-        initial_mode: str = "full_image",
+        initial_mode: str = "random_corners",
         initial_margin: float = 8.0,
+        reward_clip_range: Tuple[float, float] = (-6.0, 6.0),
+        stop_reward_success: float = 4.0,
+        stop_reward_no_tumor: float = 2.0,
+        stop_reward_false: float = -3.0,
+        time_penalty: float = 0.01,
+        hold_penalty: float = 0.5,
     ) -> None:
         self.max_steps = max(1, int(max_steps))
         self.iou_threshold = float(iou_threshold)
@@ -30,11 +36,19 @@ class TumorLocalizationEnv:
         self.scale_factor = float(scale_factor)
         self.min_bbox_size = float(min_bbox_size)
         self.initial_mode = initial_mode
-        if self.initial_mode not in {"full_image", "gt_margin"}:
-            raise ValueError("initial_mode must be 'full_image' or 'gt_margin'.")
+        if self.initial_mode not in {"random_corners", "full_image", "gt_margin"}:
+            raise ValueError("initial_mode must be 'random_corners', 'full_image' or 'gt_margin'.")
         self.initial_margin = float(initial_margin)
         if self.initial_margin < 0.0:
             raise ValueError("initial_margin must be non-negative.")
+
+        # Allow overriding of class-level reward/penalty constants per instance
+        self.REWARD_CLIP_RANGE = (float(reward_clip_range[0]), float(reward_clip_range[1]))
+        self.STOP_REWARD_SUCCESS = float(stop_reward_success)
+        self.STOP_REWARD_NO_TUMOR = float(stop_reward_no_tumor)
+        self.STOP_REWARD_FALSE = float(stop_reward_false)
+        self.TIME_PENALTY = float(time_penalty)
+        self.HOLD_PENALTY = float(hold_penalty)
 
         self.images: Optional[torch.Tensor] = None
         self.masks: Optional[torch.Tensor] = None
@@ -45,6 +59,7 @@ class TumorLocalizationEnv:
         self.active_mask: Optional[torch.Tensor] = None
         self.has_tumor: Optional[torch.Tensor] = None
         self._threshold_reached: Optional[torch.Tensor] = None
+        self.episode_id: int = 0
 
     @property
     def device(self) -> torch.device:
@@ -61,6 +76,8 @@ class TumorLocalizationEnv:
         self.images = images.detach()
         self.masks = masks.detach()
         batch_size, _, height, width = images.shape
+        # Bump episode id each time we reset to mark a new episode
+        self.episode_id = getattr(self, "episode_id", 0) + 1
 
         self.gt_bboxes, self.has_tumor = self._get_bbox_from_mask(self.masks)
         self.current_bboxes = self._initialise_bboxes(height, width)
@@ -115,10 +132,27 @@ class TumorLocalizationEnv:
         batch_size = self.gt_bboxes.size(0)
         boxes = torch.zeros(batch_size, 4, device=self.device, dtype=torch.float32)
 
+        if self.initial_mode == "random_corners":
+            # Initialize a box that covers 3/4 of the image in both width and height,
+            # and place it at a random corner for each element in the batch.
+            width_t  = torch.full((batch_size,), float(width),  device=self.device)
+            height_t = torch.full((batch_size,), float(height), device=self.device)
+
+            w = torch.clamp(0.75 * width_t,  min=self.min_bbox_size, max=width_t)
+            h = torch.clamp(0.75 * height_t, min=self.min_bbox_size, max=height_t)
+
+            corners = torch.randint(0, 4, (batch_size,), device=self.device)  # 0: TL, 1: TR, 2: BL, 3: BR
+            x = torch.where((corners == 0) | (corners == 2), torch.zeros_like(w), width_t - w)
+            y = torch.where((corners == 0) | (corners == 1), torch.zeros_like(h), height_t - h)
+
+            boxes = torch.stack([x, y, w, h], dim=1)
+            return boxes
+
         if self.initial_mode == "full_image":
             boxes[:] = torch.tensor([0.0, 0.0, float(width), float(height)], device=self.device)
             return boxes
 
+        # "gt_margin"
         for i in range(batch_size):
             if not self.has_tumor[i]:
                 boxes[i] = torch.tensor([0.0, 0.0, float(width), float(height)], device=self.device)
