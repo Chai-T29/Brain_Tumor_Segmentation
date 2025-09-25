@@ -6,7 +6,7 @@ import torch
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 
-from data.data_module import BrainTumorDataModule
+from data.data_module import PreprocessedBrainTumorDataModule
 from dqn.lightning_model import DQNLightning
 
 
@@ -29,7 +29,7 @@ def main():
     random.seed(seed)
     torch.use_deterministic_algorithms(True)  # optional, if you really need it
 
-    data_module = BrainTumorDataModule(
+    data_module = PreprocessedBrainTumorDataModule(
         data_dir=data_cfg.get("data_dir", "MU-Glioma-Post/"),
         batch_size=data_cfg.get("batch_size", 16),
         num_workers=data_cfg.get("num_workers", 0),
