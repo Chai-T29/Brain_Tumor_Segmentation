@@ -1,13 +1,17 @@
 data:
   data_dir: "MU-Glioma-Post/"
+  cache_dir: "preprocessed_data"
   batch_size: 16
-  num_workers: 8
-  persistent_workers: true
+  num_workers: 4  # Reduced from 8 to save memory
+  persistent_workers: true  # Now beneficial with memory mapping
   pin_memory: true
   prefetch_factor: 4
   val_split: 0.1
   test_split: 0.1
   include_empty_masks: false
+  target_size: [224, 224]  # Target size for resizing during preprocessing
+  force_reprocess: false  # Set to true to force reprocessing of data
+  max_cached_volumes: 10  # Number of volumes to keep in memory cache
 
 training:
   lr: 0.0005
@@ -25,13 +29,13 @@ training:
   max_epochs: 30
   
   # Action diversity parameters
-  action_history_size: 5      # Size of action history buffer for tracking diversity
-  movement_frequency: 3       # Force movement action every N zoom actions
-  diversity_penalty: 0.1      # Penalty for repeating same action too frequently
+  action_history_size: 5
+  movement_frequency: 3
+  diversity_penalty: 0.1
 
 environment:
-  iou_threshold: 0.6
-  centering_reward_weight: 0.5  # Weight for centering reward component
+  iou_threshold: 0.7
+  centering_reward_weight: 0.5
 
 logging:
   log_dir: "lightning_logs"
