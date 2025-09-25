@@ -1,6 +1,7 @@
 import os
 import random
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
 from typing import Optional
 import pytorch_lightning as pl
@@ -104,30 +105,32 @@ class BrainTumorDataModule(pl.LightningDataModule):
         # create / reuse memmaps with a progress bar
         groups = []  # each entry: (image_mm_path, mask_mm_path, [slice_idxs])
         for image_path, mask_path, key in tqdm(pairs, desc="Preparing memmaps"):
-            img_mm_path = os.path.join(cache_dir, f"{key}_image.npy")
-            msk_mm_path = os.path.join(cache_dir, f"{key}_mask.npy")
+            # Write/Reuse 224×224 in-plane memmaps
+            img_mm_path = os.path.join(cache_dir, f"{key}_image_224.npy")
+            msk_mm_path = os.path.join(cache_dir, f"{key}_mask_224.npy")
 
             need_img = not os.path.exists(img_mm_path)
             need_msk = not os.path.exists(msk_mm_path)
 
             if need_img or need_msk:
-                # load volumes only if needed, then write to .npy memmap
                 if need_img:
                     img = nib.load(image_path).get_fdata().astype(np.float32)
-                    mm = np.lib.format.open_memmap(
-                        img_mm_path, mode="w+", dtype="float32", shape=img.shape
-                    )
-                    mm[...] = img
-                    del mm
-                    del img
+                    D = img.shape[2]
+                    mm = np.lib.format.open_memmap(img_mm_path, mode="w+", dtype="float32", shape=(224, 224, D))
+                    for i in range(D):
+                        t = torch.from_numpy(img[:, :, i]).float().unsqueeze(0).unsqueeze(0)
+                        r = F.interpolate(t, size=(224, 224), mode="bilinear", align_corners=False)
+                        mm[:, :, i] = r.squeeze(0).squeeze(0).numpy()
+                    del mm; del img
                 if need_msk:
                     msk = nib.load(mask_path).get_fdata().astype(np.float32)
-                    mm = np.lib.format.open_memmap(
-                        msk_mm_path, mode="w+", dtype="float32", shape=msk.shape
-                    )
-                    mm[...] = msk
-                    del mm
-                    del msk
+                    D = msk.shape[2]
+                    mm = np.lib.format.open_memmap(msk_mm_path, mode="w+", dtype="float32", shape=(224, 224, D))
+                    for i in range(D):
+                        t = torch.from_numpy(msk[:, :, i]).float().unsqueeze(0).unsqueeze(0)
+                        r = F.interpolate(t, size=(224, 224), mode="nearest")
+                        mm[:, :, i] = r.squeeze(0).squeeze(0).numpy()
+                    del mm; del msk
 
             # determine slice indices using the memmapped mask
             mask_mm = np.load(msk_mm_path, mmap_mode="r")
@@ -167,14 +170,15 @@ class BrainTumorDataModule(pl.LightningDataModule):
         # ----------------------------
         # Step 3: build datasets (will read slices from memmaps)
         # ----------------------------
+        # Memmaps are already 224×224 → no per-sample resize
         self.train_dataset = BrainTumorDataset.from_samples(
-            train_samples, transform=self.transform, resize_shape=(224, 224)
+            train_samples, transform=self.transform, resize_shape=None
         )
         self.val_dataset = BrainTumorDataset.from_samples(
-            val_samples, transform=self.transform, resize_shape=(224, 224)
+            val_samples, transform=self.transform, resize_shape=None
         )
         self.test_dataset = BrainTumorDataset.from_samples(
-            test_samples, transform=self.transform, resize_shape=(224, 224)
+            test_samples, transform=self.transform, resize_shape=None
         )
 
         # Fallbacks if splits are empty

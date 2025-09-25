@@ -91,7 +91,7 @@ class BrainTumorDataset(Dataset):
 
         image = torch.from_numpy(np.asarray(image_slice).copy()).float().unsqueeze(0)
         mask  = torch.from_numpy(np.asarray(mask_slice).copy()).float().unsqueeze(0)
-
+        
         if self.resize_shape is not None:
             image = F.interpolate(image.unsqueeze(0), size=self.resize_shape, mode="bilinear", align_corners=False).squeeze(0)
             mask = F.interpolate(mask.unsqueeze(0), size=self.resize_shape, mode="nearest").squeeze(0)
