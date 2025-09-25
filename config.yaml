@@ -1,6 +1,6 @@
 data:
   data_dir: "MU-Glioma-Post/"
-  batch_size: 512
+  batch_size: 32
   num_workers: 12
   persistent_workers: true
   pin_memory: false
