@@ -6,24 +6,33 @@ import numpy as np
 import torch.nn.functional as F
 
 class BrainTumorDataset(Dataset):
-    """Brain Tumor Segmentation Dataset for .nii.gz files."""
+    """Brain Tumor Segmentation Dataset.
+
+    Supports two modes:
+    1) Legacy: samples contain paths to `.nii.gz` volumes; slices are read via nibabel.
+    2) Memmap: samples contain paths to `.npy` memory-mapped arrays; slices are read via np.load(..., mmap_mode='r').
+    """
 
     def __init__(self, data_dir, transform=None, include_empty_masks=False, resize_shape=(224, 224)):
         """
         Args:
             data_dir (string): Directory with all the patient folders.
-            transform (callable, optional): Optional transform to be applied
-                on a sample.
-            include_empty_masks (bool): Whether to keep slices where the mask
-                sums to zero. Defaults to ``False`` which filters out tumour-
-                free slices.
+            transform (callable, optional): Optional transform to be applied on a sample.
+            include_empty_masks (bool): Whether to keep slices where the mask sums to zero.
+            resize_shape (tuple): (H, W) to resize slices to; set None to disable.
         """
         self.data_dir = data_dir
         self.transform = transform
         self.include_empty_masks = include_empty_masks
         self.resize_shape = resize_shape
         self.samples = []
+        self._mm_cache = {}  # lazy-open cache for memmaps
 
+        if data_dir is None:
+            # Constructed via `from_samples`.
+            return
+
+        # Legacy enumeration over NIfTI files (kept for backward compatibility)
         for patient_dir in sorted(os.listdir(data_dir)):
             patient_path = os.path.join(data_dir, patient_dir)
             if not os.path.isdir(patient_path):
@@ -52,22 +61,36 @@ class BrainTumorDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
+    def _get_memmap(self, path: str):
+        arr = self._mm_cache.get(path)
+        if arr is None:
+            arr = np.load(path, mmap_mode='r')
+            self._mm_cache[path] = arr
+        return arr
+
     def __getitem__(self, idx):
         if torch.is_tensor(idx):
             idx = idx.tolist()
 
         image_path, mask_path, slice_idx = self.samples[idx]
 
-        image_nii = nib.load(image_path)
-        image_data = image_nii.get_fdata()
-        image_slice = image_data[:, :, slice_idx]
+        # Transparent support for memmap-backed `.npy` or legacy `.nii.gz`
+        if image_path.endswith('.npy') and mask_path.endswith('.npy'):
+            img_vol = self._get_memmap(image_path)
+            msk_vol = self._get_memmap(mask_path)
+            image_slice = img_vol[:, :, slice_idx]
+            mask_slice = msk_vol[:, :, slice_idx]
+        else:
+            image_nii = nib.load(image_path)
+            image_data = image_nii.get_fdata()
+            image_slice = image_data[:, :, slice_idx]
 
-        mask_nii = nib.load(mask_path)
-        mask_data = mask_nii.get_fdata()
-        mask_slice = mask_data[:, :, slice_idx]
+            mask_nii = nib.load(mask_path)
+            mask_data = mask_nii.get_fdata()
+            mask_slice = mask_data[:, :, slice_idx]
 
-        image = torch.from_numpy(image_slice).float().unsqueeze(0)  # (1,H,W)
-        mask = torch.from_numpy(mask_slice).float().unsqueeze(0)
+        image = torch.from_numpy(np.asarray(image_slice).copy()).float().unsqueeze(0)
+        mask  = torch.from_numpy(np.asarray(mask_slice).copy()).float().unsqueeze(0)
 
         if self.resize_shape is not None:
             image = F.interpolate(image.unsqueeze(0), size=self.resize_shape, mode="bilinear", align_corners=False).squeeze(0)
@@ -77,13 +100,14 @@ class BrainTumorDataset(Dataset):
         if self.transform:
             sample = self.transform(sample)
         return sample
-    
+
     @classmethod
     def from_samples(cls, samples, transform=None, include_empty_masks=False, resize_shape=(224, 224)):
         obj = cls.__new__(cls)
         obj.data_dir = None
         obj.transform = transform
         obj.include_empty_masks = include_empty_masks
-        obj.samples = samples
+        obj.samples = samples  # list of (image_path or memmap_path, mask_path or memmap_path, slice_idx)
         obj.resize_shape = resize_shape
+        obj._mm_cache = {}
         return obj

@@ -6,6 +6,16 @@ from typing import Optional
 import pytorch_lightning as pl
 from data.dataset import BrainTumorDataset
 
+# New imports for one-time decompression + progress bar
+import numpy as np
+import nibabel as nib
+try:
+    from tqdm.auto import tqdm
+except Exception:  # minimal fallback if tqdm is unavailable
+    def tqdm(x, **kwargs):
+        return x
+
+
 class NormalizeSlice:
     def __call__(self, sample):
         image, mask = sample["image"], sample["mask"]  # [1,H,W]
@@ -20,8 +30,14 @@ class NormalizeSlice:
         image = image.clamp_(-3, 3)
         return {"image": image, "mask": mask}
 
+
 class BrainTumorDataModule(pl.LightningDataModule):
-    """PyTorch Lightning data module that serves as the single entry point for data."""
+    """PyTorch Lightning data module that serves as the single entry point for data.
+
+    Adds a one-time decompression phase in `setup` that converts `.nii.gz` volumes
+    into NumPy memory-mapped arrays (.npy). Subsequent indexing uses memory maps
+    directly for fast random access without re-reading and decompressing gz files.
+    """
 
     def __init__(
         self,
@@ -58,9 +74,13 @@ class BrainTumorDataModule(pl.LightningDataModule):
             return
 
         # ----------------------------
-        # Step 1: group by patient/timepoint
+        # Step 1: one-time decompression into memory-mapped arrays
         # ----------------------------
-        groups = []  # each entry: (image_path, mask_path, [slice_idxs])
+        cache_dir = os.path.join(self.data_dir, ".cache_mm")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        # find all (image, mask) pairs
+        pairs = []  # (image_path, mask_path, key)
         for patient_dir in sorted(os.listdir(self.data_dir)):
             patient_path = os.path.join(self.data_dir, patient_dir)
             if not os.path.isdir(patient_path):
@@ -78,17 +98,46 @@ class BrainTumorDataModule(pl.LightningDataModule):
                         mask_path = os.path.join(timepoint_path, f)
 
                 if image_path and mask_path:
-                    import nibabel as nib
-                    import numpy as np
-                    mask_nii = nib.load(mask_path)
-                    mask_data = mask_nii.get_fdata()
-                    slice_indices = []
-                    for i in range(mask_data.shape[2]):
-                        has_tumor = np.sum(mask_data[:, :, i]) > 0
-                        if has_tumor or self.include_empty_masks:
-                            slice_indices.append(i)
-                    if slice_indices:
-                        groups.append((image_path, mask_path, slice_indices))
+                    key = f"{patient_dir}__{timepoint_dir}"
+                    pairs.append((image_path, mask_path, key))
+
+        # create / reuse memmaps with a progress bar
+        groups = []  # each entry: (image_mm_path, mask_mm_path, [slice_idxs])
+        for image_path, mask_path, key in tqdm(pairs, desc="Preparing memmaps"):
+            img_mm_path = os.path.join(cache_dir, f"{key}_image.npy")
+            msk_mm_path = os.path.join(cache_dir, f"{key}_mask.npy")
+
+            need_img = not os.path.exists(img_mm_path)
+            need_msk = not os.path.exists(msk_mm_path)
+
+            if need_img or need_msk:
+                # load volumes only if needed, then write to .npy memmap
+                if need_img:
+                    img = nib.load(image_path).get_fdata().astype(np.float32)
+                    mm = np.lib.format.open_memmap(
+                        img_mm_path, mode="w+", dtype="float32", shape=img.shape
+                    )
+                    mm[...] = img
+                    del mm
+                    del img
+                if need_msk:
+                    msk = nib.load(mask_path).get_fdata().astype(np.float32)
+                    mm = np.lib.format.open_memmap(
+                        msk_mm_path, mode="w+", dtype="float32", shape=msk.shape
+                    )
+                    mm[...] = msk
+                    del mm
+                    del msk
+
+            # determine slice indices using the memmapped mask
+            mask_mm = np.load(msk_mm_path, mmap_mode="r")
+            slice_indices = []
+            for i in range(mask_mm.shape[2]):
+                has_tumor = float(mask_mm[:, :, i].sum()) > 0.0
+                if has_tumor or self.include_empty_masks:
+                    slice_indices.append(i)
+            if slice_indices:
+                groups.append((img_mm_path, msk_mm_path, slice_indices))
 
         if not groups:
             raise RuntimeError("No patient/timepoint groups found in dataset.")
@@ -107,8 +156,8 @@ class BrainTumorDataModule(pl.LightningDataModule):
 
         def expand(groups_list):
             samples = []
-            for img, msk, idxs in groups_list:
-                samples.extend([(img, msk, i) for i in idxs])
+            for img_mm, msk_mm, idxs in groups_list:
+                samples.extend([(img_mm, msk_mm, i) for i in idxs])
             return samples
 
         train_samples = expand(train_groups)
@@ -116,7 +165,7 @@ class BrainTumorDataModule(pl.LightningDataModule):
         test_samples = expand(test_groups)
 
         # ----------------------------
-        # Step 3: build datasets
+        # Step 3: build datasets (will read slices from memmaps)
         # ----------------------------
         self.train_dataset = BrainTumorDataset.from_samples(
             train_samples, transform=self.transform, resize_shape=(224, 224)

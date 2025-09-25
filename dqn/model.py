@@ -99,62 +99,137 @@ class QNetwork(nn.Module):
         q_values = self.fc2(z)
         return q_values
 
+class _Norm2d(nn.Module):
+    def __init__(self, num_channels: int, num_groups: int = 8):
+        super().__init__()
+        # Use GroupNorm for stability with small batch sizes common in medical images.
+        groups = min(num_groups, num_channels)
+        self.norm = nn.GroupNorm(groups, num_channels)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.norm(x)
+
+class ResidualBlock(nn.Module):
+    """A lightweight ResNet-style block with GroupNorm and residual connection."""
+    def __init__(self, in_ch: int, out_ch: int, stride: int = 1):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.norm1 = _Norm2d(out_ch)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=False)
+        self.norm2 = _Norm2d(out_ch)
+        self.act = nn.ReLU(inplace=True)
+        self.downsample = None
+        if stride != 1 or in_ch != out_ch:
+            self.downsample = nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, kernel_size=1, stride=stride, bias=False),
+                _Norm2d(out_ch),
+            )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        identity = x
+        out = self.conv1(x)
+        out = self.norm1(out)
+        out = self.act(out)
+        out = self.conv2(out)
+        out = self.norm2(out)
+        if self.downsample is not None:
+            identity = self.downsample(x)
+        out = out + identity
+        out = self.act(out)
+        return out
+
 class DuelingQNetwork(nn.Module):
-    """Dueling Q-Network for the DQN Agent."""
+    """Dueling Q-Network with a lightweight residual CNN backbone.
+
+    Design goals:
+    - Robust but compact: residual blocks + GroupNorm for small medical batches.
+    - Global average pooling to keep parameter count modest (<< 2 GB).
+    - Same API and num_actions as before.
+    """
     def __init__(self, num_actions=9):
         super(DuelingQNetwork, self).__init__()
-        # CNN for the image. Assumes input image is resized to 224x224.
-        self.conv1 = nn.Conv2d(1, 32, kernel_size=8, stride=4)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
-        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
 
-        # Compute flattened conv output size dynamically for 224x224 input
+        # ---- Stem ----
+        self.stem = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=7, stride=2, padding=3, bias=False),
+            _Norm2d(32),
+            nn.ReLU(inplace=True),
+        )
+
+        # ---- Residual stages ----
+        # Output channels per stage kept small to avoid over-parameterization
+        self.layer1 = ResidualBlock(32, 64, stride=2)    # 112 -> 56
+        self.layer2 = ResidualBlock(64, 128, stride=2)   # 56  -> 28
+        self.layer3 = ResidualBlock(128, 128, stride=2)  # 28  -> 14
+        self.layer4 = ResidualBlock(128, 128, stride=2)  # 14  -> 7
+
+        # ---- Global pooling ----
+        self.avgpool = nn.AdaptiveAvgPool2d(1)  # -> (B, C, 1, 1)
+
+        # Compute feature size dynamically
         with torch.no_grad():
             dummy = torch.zeros(1, 1, 224, 224)
-            x = F.relu(self.conv1(dummy))
-            x = F.relu(self.conv2(x))
-            x = F.relu(self.conv3(x))
-            conv_out_size = x.view(1, -1).size(1)
+            x = self.stem(dummy)
+            x = self.layer1(x)
+            x = self.layer2(x)
+            x = self.layer3(x)
+            x = self.layer4(x)
+            x = self.avgpool(x).view(1, -1)
+            conv_out_size = x.size(1)  # expected 128
 
-        # MLP for the bounding box coordinates (x, y, w, h)
+        # ---- BBox head ----
         self.fc_bbox = nn.Linear(4, 128)
 
-        # Shared fully connected layer (same as original fc1)
-        self.fc1 = nn.Linear(conv_out_size + 128, 512)
+        # ---- Fusion + Dueling Heads ----
+        fusion_dim = conv_out_size + 128
+        self.fusion = nn.Sequential(
+            nn.Linear(fusion_dim, 512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=0.2),
+        )
 
-        # Separate heads for value and advantage
         self.value_stream = nn.Sequential(
             nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Linear(256, 1)       # outputs scalar V(s)
+            nn.ReLU(inplace=True),
+            nn.Linear(256, 1),
         )
 
         self.advantage_stream = nn.Sequential(
             nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Linear(256, num_actions)  # outputs A(s,a) for all actions
+            nn.ReLU(inplace=True),
+            nn.Linear(256, num_actions),
         )
 
-    def forward(self, image, bbox):
-        """Forward pass through the network."""
-        # Process image with CNN
-        x = F.relu(self.conv1(image))
-        x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x))
-        x = x.view(x.size(0), -1)  # Flatten
+        self._init_weights()
 
-        # Process bounding box with MLP
+    def _init_weights(self) -> None:
+        # Kaiming init for convs/linears; leave GroupNorm defaults
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+            elif isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, mode="fan_in", nonlinearity="relu")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def forward(self, image, bbox):
+        # ---- CNN path ----
+        x = self.stem(image)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.avgpool(x).view(x.size(0), -1)  # (B, C)
+
+        # ---- BBox path ----
         y = F.relu(self.fc_bbox(bbox))
 
-        # Concatenate image and bbox features
+        # ---- Fuse ----
         z = torch.cat((x, y), dim=1)
-        z = F.relu(self.fc1(z))
+        z = self.fusion(z)
 
-        # Value and Advantage streams
-        value = self.value_stream(z)                # shape (B, 1)
-        advantage = self.advantage_stream(z)        # shape (B, num_actions)
-
-        # Combine into Q-values
+        # ---- Dueling heads ----
+        value = self.value_stream(z)                # (B, 1)
+        advantage = self.advantage_stream(z)        # (B, num_actions)
         q_values = value + (advantage - advantage.mean(dim=1, keepdim=True))
         return q_values
 

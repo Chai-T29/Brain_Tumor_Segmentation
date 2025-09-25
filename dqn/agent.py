@@ -42,8 +42,6 @@ class DQNAgent:
         self.n_step_buffers: Dict[int, deque] = defaultdict(lambda: deque(maxlen=self.n_step))
         self.beta = 0.4
         self.beta_increment_per_sampling = (1.0 - self.beta) / 100000
-        # Per-environment episodic action counters: { id(env): {"episode_id": int, "counts": LongTensor[B, num_actions]} }
-        self._per_env_action_counts: Dict[int, Dict[str, torch.Tensor]] = {}
         # if self.epsilon_start <= 0:
         #     self._step_decay = 1.0
         # else:
@@ -118,64 +116,70 @@ class DQNAgent:
 
     def select_action(self, state, env, greedy: bool = False) -> torch.Tensor:
         image, bbox = state
-        if image.dim()==3: image=image.unsqueeze(0)
-        if bbox.dim()==1:  bbox=bbox.unsqueeze(0)
+        if image.dim() == 3:
+            image = image.unsqueeze(0)
+        if bbox.dim() == 1:
+            bbox = bbox.unsqueeze(0)
 
         B = image.size(0)
-        image = image.to(self.device); bbox = bbox.to(self.device)
+        image = image.to(self.device)
+        bbox = bbox.to(self.device)
 
         with torch.no_grad():
             q = self.policy_net(image, bbox)
             greedy_actions = q.argmax(dim=1)  # (B,)
 
-        if greedy:
-            return greedy_actions.detach()
-
-        # Maintain per-episode action counts keyed by environment identity
-        env_key = id(env)
-        current_episode_id = getattr(env, "episode_id", None)
-        store = self._per_env_action_counts.get(env_key)
-        if (store is None) or (store.get("episode_id") != current_episode_id) or (store["counts"].size(0) != B):
-            counts = torch.zeros(B, self.num_actions, device=self.device, dtype=torch.long)
-            self._per_env_action_counts[env_key] = {"episode_id": current_episode_id, "counts": counts}
+        # Force STOP when IoU >= threshold (and tumor present/active)
+        actions = greedy_actions.clone()
+        stop_at_threshold = None
+        if getattr(env, "last_iou", None) is not None:
+            tumor_present = (env.has_tumor if getattr(env, "has_tumor", None) is not None
+                             else torch.ones(B, device=self.device, dtype=torch.bool))
+            active = (env.active_mask if getattr(env, "active_mask", None) is not None
+                      else torch.ones(B, device=self.device, dtype=torch.bool))
+            stop_at_threshold = (env.last_iou.to(self.device) >= float(env.iou_threshold)) & tumor_present & active
+            actions = torch.where(stop_at_threshold, torch.full_like(actions, env._STOP_ACTION), actions)
         else:
-            counts = store["counts"]
+            tumor_present = torch.ones(B, device=self.device, dtype=torch.bool)
+            active = torch.ones(B, device=self.device, dtype=torch.bool)
+            stop_at_threshold = torch.zeros(B, device=self.device, dtype=torch.bool)
+
+        if greedy:
+            return actions.detach()
 
         # Which rows explore this step?
         explore_mask = torch.rand(B, device=self.device) < self.current_epsilon
 
-        # Fast path: nobody explores
-        if not explore_mask.any():
-            actions = greedy_actions
-        else:
-            # Compute positive mask only when needed, vectorized
-            pos_mask = env.positive_actions_mask()  # (B,8)
+        if explore_mask.any():
+            pos_mask = env.positive_actions_mask()                # (B, 8) on-device
+            any_pos = pos_mask.any(dim=1)                         # (B,)
             best_by_iou = env.best_action_by_iou(include_stop=True)  # (B,)
 
-            actions = greedy_actions.clone()
-            idx = torch.nonzero(explore_mask, as_tuple=False).squeeze(1)
-            for i in idx.tolist():
-                if env.has_tumor is not None and not bool(env.has_tumor[i]):
-                    a = env._STOP_ACTION
-                else:
-                    # candidates that are positive for this row
-                    pos_idx = torch.nonzero(pos_mask[i], as_tuple=False).squeeze(1)
-                    if pos_idx.numel() > 0:
-                        # Choose among positive actions the one used least so far this episode (tie-break uniformly)
-                        row_counts = self._per_env_action_counts[env_key]["counts"][i, pos_idx]
-                        min_count = row_counts.min()
-                        least_mask = (row_counts == min_count)
-                        least_idx = torch.nonzero(least_mask, as_tuple=False).squeeze(1)
-                        j = torch.randint(0, least_idx.numel(), (1,), device=self.device)
-                        a = int(pos_idx[least_idx[j]].item())
-                    else:
-                        # fallback: best IoU in one step (incl STOP)
-                        a = int(best_by_iou[i].item())
-                actions[i] = a
+            # Masks to guide choices (all on device)
+            below_threshold = (env.last_iou.to(self.device) < float(env.iou_threshold)) if getattr(env, "last_iou", None) is not None else torch.zeros(B, dtype=torch.bool, device=self.device)
+            no_tumor = (~tumor_present) & active
+            explore_rows = explore_mask & (~stop_at_threshold)
 
-        # Update episodic action counters with the actions we just took
-        rows = torch.arange(B, device=self.device)
-        self._per_env_action_counts[env_key]["counts"][rows, actions] += 1
+            # Case A: rows needing full random action (no positives, below threshold, tumor present & active)
+            random_needed = explore_rows & (~any_pos) & below_threshold & tumor_present & active
+            idx_random = torch.nonzero(random_needed, as_tuple=False).squeeze(1)
+            if idx_random.numel() > 0:
+                actions[idx_random] = torch.randint(0, 8, (idx_random.numel(),), device=self.device)
+
+            # Case B: rows with positives → sample uniformly among positive actions (fully vectorized)
+            pos_needed = explore_rows & any_pos
+            idx_pos = torch.nonzero(pos_needed, as_tuple=False).squeeze(1)
+            if idx_pos.numel() > 0:
+                # Build probabilities by masking invalid actions to zero and sampling one per row
+                probs = pos_mask[pos_needed].float()  # (M, 8), each row has at least one 1
+                chosen = torch.multinomial(probs, num_samples=1).squeeze(1)  # (M,)
+                actions[idx_pos] = chosen
+
+            # Case C: remaining explore rows (e.g., no tumor) → fallback to oracle (may be STOP)
+            remaining = explore_rows & ~(random_needed | pos_needed)
+            idx_rem = torch.nonzero(remaining, as_tuple=False).squeeze(1)
+            if idx_rem.numel() > 0:
+                actions[idx_rem] = best_by_iou[idx_rem]
 
         # epsilon decay
         self.global_step += 1

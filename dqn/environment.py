@@ -383,20 +383,19 @@ class TumorLocalizationEnv:
     @torch.no_grad()
     def best_action_by_iou(self, include_stop: bool = True, eps: float = 1e-6) -> torch.Tensor:
         """Return the best lookahead action by IoU.
-        If no non-stop action increases IoU over the current box by more than `eps`,
-        and `include_stop` is True, return STOP. Otherwise return the argmax among candidates.
+        If the current IoU meets/exceeds the threshold and `include_stop` is True, return STOP.
+        Otherwise return the argmax among the 8 non-stop candidates.
         """
         assert self.last_iou is not None and self.current_bboxes is not None
-        # IoU of the 8 candidate (non-stop) actions
         cand = self._candidate_boxes_all_actions()          # (B, 8, 4)
         iou_new = self._iou_candidates(cand)                # (B, 8)
         cur = self.last_iou                                 # (B,)
-        max_iou, max_idx = iou_new.max(dim=1)               # (B,), (B,)
-        no_improve = (max_iou - cur) <= eps
+        _, max_idx = iou_new.max(dim=1)                     # (B,)
         if include_stop:
+            tumor_present = self.has_tumor if self.has_tumor is not None else torch.ones_like(cur, dtype=torch.bool)
+            at_threshold = (cur >= self.iou_threshold) & tumor_present
             stop_idx = torch.full_like(max_idx, self._STOP_ACTION)
-            return torch.where(no_improve, stop_idx, max_idx)
-        # If include_stop is False, just return the best candidate index (0..7)
+            return torch.where(at_threshold, stop_idx, max_idx)
         return max_idx
     
 
