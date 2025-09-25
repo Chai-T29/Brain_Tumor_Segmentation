@@ -9,7 +9,7 @@ from dqn.replay_memory import Experience, PrioritizedReplayMemory
 
 
 class DQNAgent:
-    """The DQN (or DDQN) Agent that interacts with and learns from the environment."""
+    """Memory-optimized DQN Agent."""
 
     def __init__(
         self,
@@ -23,10 +23,10 @@ class DQNAgent:
         memory_size: int = 10000,
         batch_size: int = 64,
         target_update: int = 10,
-        # New parameters for action diversity
         action_history_size: int = 5,
-        movement_frequency: int = 3,  # Force movement every N zoom actions
-        diversity_penalty: float = 0.1,  # Penalty for repeating same action
+        movement_frequency: int = 3,
+        diversity_penalty: float = 0.1,
+        gpu_memory_fraction: float = 0.8,  # Keep most of replay buffer on GPU
     ) -> None:
         self.num_actions = num_actions
         self.gamma = gamma
@@ -35,6 +35,7 @@ class DQNAgent:
         self.epsilon_decay = max(1, epsilon_decay)
         self.batch_size = batch_size
         self.target_update = target_update
+        self.gpu_memory_fraction = gpu_memory_fraction
 
         self.policy_net = policy_net
         self.target_net = target_net
@@ -52,7 +53,7 @@ class DQNAgent:
         self.movement_frequency = movement_frequency
         self.diversity_penalty = diversity_penalty
         self.action_history: Dict[int, deque] = defaultdict(lambda: deque(maxlen=action_history_size))
-        self.zoom_counters: Dict[int, int] = defaultdict(int)  # Track consecutive zoom actions
+        self.zoom_counters: Dict[int, int] = defaultdict(int)
 
     @property
     def device(self) -> torch.device:
@@ -67,12 +68,12 @@ class DQNAgent:
         self.current_epsilon = self.epsilon_start - progress * (self.epsilon_start - self.epsilon_end)
 
     def _is_zoom_action(self, action: int) -> bool:
-        """Check if action is a zoom action (scale up/down or shape changes)."""
-        return action in [4, 5, 6, 7]  # scale up, scale down, shrink top/bottom, shrink left/right
-    
+        """Check if action is a zoom action."""
+        return action in [4, 5, 6, 7]
+
     def _is_movement_action(self, action: int) -> bool:
         """Check if action is a movement action."""
-        return action in [0, 1, 2, 3]  # right, left, up, down
+        return action in [0, 1, 2, 3]
 
     def _should_force_movement(self, env_idx: int) -> bool:
         """Check if we should force a movement action for diversity."""
@@ -85,7 +86,7 @@ class DQNAgent:
         if self._is_zoom_action(action):
             self.zoom_counters[env_idx] += 1
         elif self._is_movement_action(action):
-            self.zoom_counters[env_idx] = 0  # Reset zoom counter after movement
+            self.zoom_counters[env_idx] = 0
 
     def _get_diversity_penalty(self, env_idx: int, action: int) -> float:
         """Calculate penalty for repeating actions too frequently."""
@@ -93,9 +94,9 @@ class DQNAgent:
             return 0.0
         
         recent_actions = list(self.action_history[env_idx])
-        same_action_count = sum(1 for a in recent_actions[-3:] if a == action)  # Check last 3 actions
+        same_action_count = sum(1 for a in recent_actions[-3:] if a == action)
         
-        if same_action_count >= 2:  # If action appears 2+ times in last 3 actions
+        if same_action_count >= 2:
             return self.diversity_penalty * same_action_count
         return 0.0
 
@@ -129,23 +130,44 @@ class DQNAgent:
         next_state_bboxes: torch.Tensor,
         done: torch.Tensor,
     ) -> None:
-        """Push a batch of experiences to the replay buffer without extra cloning."""
-
+        """Memory-optimized batch experience pushing."""
+        
         if actions.dim() == 1:
             actions = actions.view(-1, 1)
 
         batch_size = state_images.size(0)
+        
+        # Decide whether to keep data on GPU or move to CPU based on memory settings
+        # Keep a portion on GPU for faster access, rest on CPU
+        gpu_batch_size = int(batch_size * self.gpu_memory_fraction)
+        
         for env_idx in range(batch_size):
             done_flag = bool(done[env_idx].item())
-            state = (state_images[env_idx], state_bboxes[env_idx])
-            action = actions[env_idx].view(1, 1)
-            reward = rewards[env_idx].view(1)
-            next_state = None
-            if not done_flag:
-                next_state = (
-                    next_state_images[env_idx],
-                    next_state_bboxes[env_idx],
-                )
+            
+            # Keep some data on GPU, some on CPU to balance memory usage
+            if env_idx < gpu_batch_size:
+                # Keep on GPU (faster but uses GPU memory)
+                state = (state_images[env_idx].to(self.device), 
+                        state_bboxes[env_idx].to(self.device))
+                action = actions[env_idx].to(self.device).view(1, 1)
+                reward = rewards[env_idx].to(self.device).view(1)
+                next_state = None
+                if not done_flag:
+                    next_state = (
+                        next_state_images[env_idx].to(self.device),
+                        next_state_bboxes[env_idx].to(self.device),
+                    )
+            else:
+                # Keep on CPU (saves GPU memory)
+                state = (state_images[env_idx].cpu(), state_bboxes[env_idx].cpu())
+                action = actions[env_idx].cpu().view(1, 1)
+                reward = rewards[env_idx].cpu().view(1)
+                next_state = None
+                if not done_flag:
+                    next_state = (
+                        next_state_images[env_idx].cpu(),
+                        next_state_bboxes[env_idx].cpu(),
+                    )
 
             self.push_experience(
                 state,
@@ -166,24 +188,20 @@ class DQNAgent:
 
         with torch.no_grad():
             q = self.policy_net(image, bbox)
-            greedy_actions = q.argmax(dim=1)  # (B,)
+            greedy_actions = q.argmax(dim=1)
 
         if greedy:
-            # Even in greedy mode, track actions for consistency
             for i in range(B):
                 self._update_action_tracking(i, int(greedy_actions[i].item()))
             return greedy_actions.detach()
 
-        # Which rows explore this step?
         explore_mask = torch.rand(B, device=self.device) < self.current_epsilon
 
-        # Fast path: nobody explores
         if not explore_mask.any():
             actions = greedy_actions
         else:
-            # Compute positive mask only when needed, vectorized
-            pos_mask = env.positive_actions_mask()  # (B,8)
-            best_by_iou = env.best_action_by_iou(include_stop=True)  # (B,)
+            pos_mask = env.positive_actions_mask()
+            best_by_iou = env.best_action_by_iou(include_stop=True)
 
             actions = greedy_actions.clone()
             idx = torch.nonzero(explore_mask, as_tuple=False).squeeze(1)
@@ -191,21 +209,16 @@ class DQNAgent:
                 if env.has_tumor is not None and not bool(env.has_tumor[i]):
                     a = env._STOP_ACTION
                 else:
-                    # Check if we should force movement for diversity
                     if self._should_force_movement(i):
-                        # Force a movement action
-                        movement_actions = [0, 1, 2, 3]  # right, left, up, down
-                        # Filter for positive movement actions if possible
+                        movement_actions = [0, 1, 2, 3]
                         pos_movements = [act for act in movement_actions if pos_mask[i][act]]
                         if pos_movements:
                             a = random.choice(pos_movements)
                         else:
                             a = random.choice(movement_actions)
                     else:
-                        # Normal exploration logic with diversity consideration
                         pos_idx = torch.nonzero(pos_mask[i], as_tuple=False).squeeze(1)
                         if pos_idx.numel() > 0:
-                            # Filter out recently used actions to encourage diversity
                             available_actions = []
                             for act_idx in pos_idx.tolist():
                                 penalty = self._get_diversity_penalty(i, act_idx)
@@ -215,27 +228,23 @@ class DQNAgent:
                             if available_actions:
                                 a = random.choice(available_actions)
                             else:
-                                # Fallback to any positive action if all have penalties
                                 j = torch.randint(0, pos_idx.numel(), (1,), device=self.device)
                                 a = pos_idx[j].item()
                         else:
-                            # fallback: best IoU in one step (incl STOP)
                             a = int(best_by_iou[i].item())
                 actions[i] = a
 
-        # Update action tracking for all environments
         for i in range(B):
             self._update_action_tracking(i, int(actions[i].item()))
 
-        # epsilon decay
+        # Epsilon decay
         self.global_step += 1
         frac = min(1.0, self.global_step / self.epsilon_decay)
         self.current_epsilon = self.epsilon_end + (self.epsilon_start - self.epsilon_end) * ((1 - frac) ** 3)
         return actions.detach()
 
     def compute_loss(self) -> Optional[torch.Tensor]:
-        """Computes the DQN loss without performing an optimization step."""
-        sample_n = 50
+        sample_n = max(self.batch_size, 1000)  # Need at least 1000 samples
         if len(self.memory) < sample_n:
             return None
 
@@ -246,17 +255,19 @@ class DQNAgent:
             experiences = list(sampled)
             indices = sampled.indices
             weights = sampled.weights
+        
         self.beta = min(1.0, self.beta + self.beta_increment_per_sampling)
         batch = Experience(*zip(*experiences))
         weights = weights.to(self.device)
 
         state_batch = batch.state
-        action_batch = torch.cat(batch.action).to(self.device)
-        reward_batch = torch.cat(batch.reward).to(self.device)
+        action_batch = torch.cat([a.to(self.device) for a in batch.action])
+        reward_batch = torch.cat([r.to(self.device) for r in batch.reward])
         next_state_batch = batch.next_state
 
-        image_batch = torch.stack([s[0] for s in state_batch]).to(self.device)
-        bbox_batch = torch.stack([s[1] for s in state_batch]).to(self.device)
+        # Move state data to device as needed
+        image_batch = torch.stack([s[0].to(self.device) for s in state_batch])
+        bbox_batch = torch.stack([s[1].to(self.device) for s in state_batch])
 
         state_action_values = self.policy_net(image_batch, bbox_batch).gather(1, action_batch)
 
@@ -270,23 +281,24 @@ class DQNAgent:
 
         non_final_mask = torch.tensor(non_final_mask_list, device=self.device, dtype=torch.bool)
 
-        # Double-DQN Setup (reduces overestimation bias)
+        # Double-DQN Setup with memory optimization
         next_state_values = torch.zeros(sample_n, device=self.device)
         
         if non_final_next_states:
-            non_final_next_images = torch.stack([s[0] for s in non_final_next_states]).to(self.device)
-            non_final_next_bboxes = torch.stack([s[1] for s in non_final_next_states]).to(self.device)
+            non_final_next_images = torch.stack([s[0].to(self.device) for s in non_final_next_states])
+            non_final_next_bboxes = torch.stack([s[1].to(self.device) for s in non_final_next_states])
 
             with torch.no_grad():
-                # 1) Action selection uses the *policy* network
                 q_next_policy = self.policy_net(non_final_next_images, non_final_next_bboxes)
-                next_actions = q_next_policy.argmax(dim=1, keepdim=True)  # shape (M, 1)
+                next_actions = q_next_policy.argmax(dim=1, keepdim=True)
 
-                # 2) Action evaluation uses the *target* network
                 q_next_target = self.target_net(non_final_next_images, non_final_next_bboxes)
-                q_next_chosen = q_next_target.gather(1, next_actions).squeeze(1)  # shape (M,)
+                q_next_chosen = q_next_target.gather(1, next_actions).squeeze(1)
 
             next_state_values[non_final_mask] = q_next_chosen
+            
+            # Clear intermediate tensors to save memory
+            del non_final_next_images, non_final_next_bboxes, q_next_policy, q_next_target
 
         n_used_batch = torch.tensor([n for n in batch.n_used], device=self.device, dtype=torch.float32)
         expected_state_action_values = reward_batch + (self.gamma ** n_used_batch) * next_state_values
@@ -296,6 +308,14 @@ class DQNAgent:
 
         td_errors = (td_target - state_action_values).detach().squeeze(1).abs().cpu().numpy() + 1e-6
         self.memory.update_priorities(indices, td_errors)
+        
+        # Clear batch tensors to prevent memory buildup
+        del image_batch, bbox_batch, state_action_values, td_target
+        
+        # Force GPU cache cleanup
+        if self.device.type == 'cuda':
+            torch.cuda.empty_cache()
+        
         return loss
 
     def _aggregate_n_step(self, transitions):
@@ -323,3 +343,19 @@ class DQNAgent:
 
     def state_dict(self) -> dict:
         return self.policy_net.state_dict()
+
+    def cleanup_memory(self):
+        """Force cleanup of tracked data structures."""
+        # Clear action tracking for inactive environments
+        active_envs = set()
+        for env_idx in list(self.action_history.keys()):
+            if len(self.action_history[env_idx]) > 0:
+                active_envs.add(env_idx)
+        
+        # Remove tracking for environments that haven't been used recently
+        if len(active_envs) > 100:  # Arbitrary threshold
+            for env_idx in list(self.action_history.keys()):
+                if env_idx not in active_envs:
+                    del self.action_history[env_idx]
+                    if env_idx in self.zoom_counters:
+                        del self.zoom_counters[env_idx]
