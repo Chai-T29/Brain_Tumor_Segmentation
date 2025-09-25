@@ -23,6 +23,9 @@ training:
   seed: 42
   val_interval: 1
   max_epochs: 30
+  learn_every: 4
+  min_buffer_size: 1024
+  updates_per_step: 2
 
 environment:
   iou_threshold: 0.7
@@ -37,6 +40,7 @@ environment:
   stop_reward_false: -3.0
   time_penalty: 0.02
   hold_penalty: 0.5
+  resize_shape: null
 
 logging:
   log_dir: "lightning_logs"

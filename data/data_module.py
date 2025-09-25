@@ -192,6 +192,7 @@ class BrainTumorDataModule(pl.LightningDataModule):
             raise RuntimeError("Dataset has not been set up. Call `.setup()` before requesting dataloaders.")
 
         persistent = self.persistent_workers and self.num_workers > 0
+        prefetch = self.prefetch_factor if self.num_workers > 0 else None
         return DataLoader(
             dataset,
             batch_size=self.batch_size,
@@ -199,7 +200,7 @@ class BrainTumorDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             persistent_workers=persistent,
             pin_memory=self.pin_memory,
-            prefetch_factor=self.prefetch_factor,
+            prefetch_factor=prefetch,
         )
 
     def train_dataloader(self) -> DataLoader:
