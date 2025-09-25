@@ -27,6 +27,9 @@ class DQNLightning(pl.LightningModule):
         memory_size: int = 10000,
         target_update: int = 10,
         max_steps: int = 100,
+        learn_every: int = 4,
+        min_buffer_size: int = 256,
+        updates_per_step: int = 1,
         grad_clip: float = 1.0,
         lr_gamma: float = 0.995,
         val_interval: int = 1,
@@ -58,6 +61,9 @@ class DQNLightning(pl.LightningModule):
             memory_size=self.hparams.memory_size,
             batch_size=self.hparams.batch_size,
             target_update=self.hparams.target_update,
+            learn_every=self.hparams.learn_every,
+            min_buffer_size=self.hparams.min_buffer_size,
+            updates_per_step=self.hparams.updates_per_step,
         )
 
         # Use provided environments if given, otherwise create defaults
@@ -68,6 +74,10 @@ class DQNLightning(pl.LightningModule):
         self._opt_steps = 0
         self._gif_output_dir = Path(self.hparams.test_gif_dir)
         self._test_episode_index = 0
+
+    def on_fit_start(self) -> None:
+        super().on_fit_start()
+        self.agent.sync_memory_device()
 
     # ------------------------------------------------------------------
     # Training loop
@@ -102,40 +112,34 @@ class DQNLightning(pl.LightningModule):
                 actions, minlength=self.agent.num_actions
             ).to(self.device, dtype=action_counts.dtype)
 
-            rewards_device = rewards.to(self.device)
-            rewards_cpu = rewards.detach().cpu()
-            cumulative_rewards += rewards_device
+            cumulative_rewards += rewards
             steps_taken += active_mask.float()
             iou_values.append(info["iou"].to(self.device))
 
-            state_images_cpu = state[0].detach().cpu()
-            state_bboxes_cpu = state[1].detach().cpu()
-            next_state_images_cpu = next_state[0].detach().cpu()
-            next_state_bboxes_cpu = next_state[1].detach().cpu()
-            actions_cpu = actions.detach().view(-1, 1).cpu()
-            rewards_cpu = rewards_cpu.view(-1)
-            done_cpu = done.detach().cpu()
-
             self.agent.push_experience_batch(
-                state_images_cpu,
-                state_bboxes_cpu,
-                actions_cpu,
-                rewards_cpu,
-                next_state_images_cpu,
-                next_state_bboxes_cpu,
-                done_cpu,
+                state[0],
+                state[1],
+                actions,
+                rewards.view(-1, 1),
+                next_state[0],
+                next_state[1],
+                done,
             )
 
-            loss = self.agent.compute_loss()
-            if loss is not None:
-                optimizer.zero_grad()
-                self.manual_backward(loss)
-                torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.hparams.grad_clip)
-                optimizer.step()
-                losses.append(loss.detach())
-                self._opt_steps += 1
-                if self._opt_steps % self.hparams.target_update == 0:
-                    self.agent.update_target_net()
+            if self.agent.ready_to_learn():
+                for _ in range(self.agent.updates_per_step):
+                    loss = self.agent.compute_loss()
+                    if loss is None:
+                        break
+                    optimizer.zero_grad()
+                    self.manual_backward(loss)
+                    torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.hparams.grad_clip)
+                    optimizer.step()
+                    losses.append(loss.detach())
+                    self._opt_steps += 1
+                    if self._opt_steps % self.hparams.target_update == 0:
+                        self.agent.update_target_net()
+                self.agent.reset_update_tracker()
 
             state = next_state
             active_mask = active_mask & ~done.to(self.device)

@@ -100,6 +100,10 @@ def main():
     )
 
     # Construct test environment from config and attach to model
+    resize_shape = env_cfg.get("resize_shape")
+    if resize_shape is not None:
+        resize_shape = tuple(resize_shape)
+
     env_common = dict(
         max_steps=training_cfg.get("max_steps", 100),
         iou_threshold=env_cfg.get("iou_threshold", 0.8),
@@ -114,6 +118,7 @@ def main():
         stop_reward_false=env_cfg.get("stop_reward_false", -3.0),
         time_penalty=env_cfg.get("time_penalty", 0.01),
         hold_penalty=env_cfg.get("hold_penalty", 0.5),
+        resize_shape=resize_shape,
     )
     test_env = TumorLocalizationEnv(**env_common)
     model.test_env = test_env

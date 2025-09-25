@@ -1,11 +1,9 @@
-import random
+from collections import defaultdict, deque
 
-import numpy as np
 import pytest
 import torch
 
 from dqn.agent import DQNAgent
-from dqn.replay_memory import Experience
 
 
 class DummyNet(torch.nn.Module):
@@ -22,40 +20,42 @@ class DummyNet(torch.nn.Module):
         return self.base_q_values.unsqueeze(0).expand(batch_size, -1) + self.bias.unsqueeze(0)
 
 
-def _compute_expected_loss(agent, experiences):
-    batch = Experience(*zip(*experiences))
+def _compute_expected_loss(agent, batch, weights):
+    device = agent.device
+    state_images = batch.state_images.to(device)
+    state_bboxes = batch.state_bboxes.to(device)
+    actions = batch.actions.to(device).long()
+    rewards = batch.rewards.to(device).view(-1)
+    next_state_images = batch.next_state_images.to(device)
+    next_state_bboxes = batch.next_state_bboxes.to(device)
+    dones = batch.dones.to(device).view(-1).bool()
+    n_used = batch.n_used.to(device).view(-1)
+    weights = weights.to(device).view(-1, 1)
 
-    state_batch = batch.state
-    action_batch = torch.cat(batch.action).to(agent.device)
-    reward_batch = torch.cat(batch.reward).to(agent.device)
+    state_action_values = agent.policy_net(state_images, state_bboxes).gather(1, actions)
 
-    image_batch = torch.stack([s[0] for s in state_batch]).to(agent.device)
-    bbox_batch = torch.stack([s[1] for s in state_batch]).to(agent.device)
+    next_state_values = torch.zeros_like(rewards)
+    non_final_mask = ~dones
+    if non_final_mask.any():
+        next_images = next_state_images[non_final_mask]
+        next_bboxes = next_state_bboxes[non_final_mask]
+        with torch.no_grad():
+            q_next_policy = agent.policy_net(next_images, next_bboxes)
+            next_actions = q_next_policy.argmax(dim=1, keepdim=True)
+            q_next_target = agent.target_net(next_images, next_bboxes)
+            q_next_selected = q_next_target.gather(1, next_actions).squeeze(1)
+        next_state_values[non_final_mask] = q_next_selected
 
-    state_action_values = agent.policy_net(image_batch, bbox_batch).gather(1, action_batch)
+    gamma_power = agent.gamma ** n_used
+    targets = rewards + gamma_power * next_state_values
 
-    non_final_mask_list = []
-    non_final_next_states = []
-    for next_state, done in zip(batch.next_state, batch.done):
-        is_non_final = (next_state is not None) and (not done)
-        non_final_mask_list.append(is_non_final)
-        if is_non_final:
-            non_final_next_states.append(next_state)
-
-    non_final_mask = torch.tensor(non_final_mask_list, device=agent.device, dtype=torch.bool)
-
-    next_state_values = torch.zeros(agent.batch_size, device=agent.device)
-    if non_final_next_states:
-        non_final_next_images = torch.stack([s[0] for s in non_final_next_states]).to(agent.device)
-        non_final_next_bboxes = torch.stack([s[1] for s in non_final_next_states]).to(agent.device)
-        next_state_values[non_final_mask] = agent.target_net(non_final_next_images, non_final_next_bboxes).max(1)[0].detach()
-
-    expected_state_action_values = reward_batch + agent.gamma * next_state_values
-
-    loss = torch.nn.functional.smooth_l1_loss(
-        state_action_values, expected_state_action_values.unsqueeze(1)
+    loss_elements = torch.nn.functional.smooth_l1_loss(
+        state_action_values,
+        targets.unsqueeze(1),
+        reduction="none",
     )
-    return loss, expected_state_action_values
+    loss = (loss_elements * weights).mean()
+    return loss, targets
 
 
 def test_optimize_model_handles_terminal_transition():
@@ -71,48 +71,51 @@ def test_optimize_model_handles_terminal_transition():
         epsilon_start=0.0,
         epsilon_end=0.0,
         epsilon_decay=1,
+        learn_every=1,
+        min_buffer_size=1,
+        updates_per_step=1,
+    )
+    agent.n_step = 1
+    agent.n_step_buffers = defaultdict(lambda: deque(maxlen=agent.n_step))
+    agent.sync_memory_device()
+
+    image = torch.zeros(1, 84, 84, device=device)
+    bbox = torch.zeros(4, device=device)
+    next_image = torch.ones(1, 84, 84, device=device)
+    next_bbox = torch.ones(4, device=device)
+
+    state_images = torch.stack([image, image + 2], dim=0)
+    state_bboxes = torch.stack([bbox, bbox + 2], dim=0)
+    actions = torch.tensor([1, 0], dtype=torch.long, device=device)
+    rewards = torch.tensor([1.0, 2.0], dtype=torch.float32, device=device)
+    next_state_images = torch.stack([next_image, next_image * 0], dim=0)
+    next_state_bboxes = torch.stack([next_bbox, next_bbox * 0], dim=0)
+    dones = torch.tensor([False, True], dtype=torch.bool, device=device)
+
+    agent.push_experience_batch(
+        state_images,
+        state_bboxes,
+        actions,
+        rewards,
+        next_state_images,
+        next_state_bboxes,
+        dones,
     )
 
-    # Construct two experiences, one of which is terminal with no next state.
-    image = torch.zeros(1, 84, 84)
-    bbox = torch.zeros(4)
-    next_image = torch.ones(1, 84, 84)
-    next_bbox = torch.ones(4)
+    assert len(agent.memory) == 2
 
-    agent.memory.push(
-        (image, bbox),
-        torch.tensor([[1]], dtype=torch.long, device=agent.device),
-        torch.tensor([1.0], dtype=torch.float32, device=agent.device),
-        (next_image, next_bbox),
-        False,
-    )
-
-    agent.memory.push(
-        (image + 2, bbox + 2),
-        torch.tensor([[0]], dtype=torch.long, device=agent.device),
-        torch.tensor([2.0], dtype=torch.float32, device=agent.device),
-        None,
-        True,
-    )
-
-    random.seed(0)
-    np.random.seed(0)
-    sampled = agent.memory.sample(agent.batch_size)
-    if isinstance(sampled, tuple):
-        experiences = sampled[0]
-    else:
-        experiences = list(sampled)
-    expected_loss, expected_targets = _compute_expected_loss(agent, experiences)
+    torch.manual_seed(0)
+    beta = agent.beta
+    batch, _, weights = agent.memory.sample(agent.batch_size, beta=beta)
+    expected_loss, expected_targets = _compute_expected_loss(agent, batch, weights)
 
     # Ensure terminal transitions produce targets equal to their rewards.
-    sampled_batch = Experience(*zip(*experiences))
-    rewards = [r.item() for r in sampled_batch.reward]
-    for idx, (next_state, done) in enumerate(zip(sampled_batch.next_state, sampled_batch.done)):
-        if done or next_state is None:
-            assert expected_targets[idx].item() == pytest.approx(rewards[idx])
+    for idx in range(expected_targets.size(0)):
+        if batch.dones[idx].item():
+            assert expected_targets[idx].item() == pytest.approx(batch.rewards[idx].item())
 
-    random.seed(0)
-    np.random.seed(0)
+    agent.beta = beta
+    torch.manual_seed(0)
     loss_value = agent.compute_loss()
 
     assert loss_value is not None

@@ -43,6 +43,10 @@ def main():
         include_empty_masks=data_cfg.get("include_empty_masks", False),
     )
 
+    resize_shape = env_cfg.get("resize_shape")
+    if resize_shape is not None:
+        resize_shape = tuple(resize_shape)
+
     env_common = dict(
         max_steps=training_cfg.get("max_steps", 100),
         iou_threshold=env_cfg.get("iou_threshold", 0.8),
@@ -57,6 +61,7 @@ def main():
         stop_reward_false=env_cfg.get("stop_reward_false", -3.0),
         time_penalty=env_cfg.get("time_penalty", 0.01),
         hold_penalty=env_cfg.get("hold_penalty", 0.5),
+        resize_shape=resize_shape,
     )
     train_env = TumorLocalizationEnv(**env_common)
     val_env = TumorLocalizationEnv(**env_common)
@@ -72,6 +77,9 @@ def main():
         memory_size=training_cfg.get("memory_size", 50000),
         target_update=training_cfg.get("target_update", 10),
         max_steps=training_cfg.get("max_steps", 100),
+        learn_every=training_cfg.get("learn_every", 4),
+        min_buffer_size=training_cfg.get("min_buffer_size", 256),
+        updates_per_step=training_cfg.get("updates_per_step", 1),
         grad_clip=training_cfg.get("grad_clip", 1.0),
         lr_gamma=training_cfg.get("lr_gamma", 0.995),
         val_interval=training_cfg.get("val_interval", 1),

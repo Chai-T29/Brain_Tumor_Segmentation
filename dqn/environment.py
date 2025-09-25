@@ -1,5 +1,6 @@
 from typing import ClassVar, Dict, Optional, Tuple
 import torch
+import torch.nn.functional as F
 
 
 class TumorLocalizationEnv:
@@ -29,6 +30,7 @@ class TumorLocalizationEnv:
         stop_reward_false: float = -3.0,
         time_penalty: float = 0.01,
         hold_penalty: float = 0.5,
+        resize_shape: Optional[Tuple[int, int]] = None,
     ) -> None:
         self.max_steps = max(1, int(max_steps))
         self.iou_threshold = float(iou_threshold)
@@ -41,6 +43,7 @@ class TumorLocalizationEnv:
         self.initial_margin = float(initial_margin)
         if self.initial_margin < 0.0:
             raise ValueError("initial_margin must be non-negative.")
+        self.resize_shape = resize_shape
 
         # Allow overriding of class-level reward/penalty constants per instance
         self.REWARD_CLIP_RANGE = (float(reward_clip_range[0]), float(reward_clip_range[1]))
@@ -73,8 +76,17 @@ class TumorLocalizationEnv:
         if images.size(0) != masks.size(0):
             raise ValueError("Batch size mismatch.")
 
-        self.images = images.detach()
-        self.masks = masks.detach()
+        images = images.detach()
+        masks = masks.detach()
+        if self.resize_shape is not None:
+            target_h, target_w = map(int, self.resize_shape)
+            if images.size(-2) != target_h or images.size(-1) != target_w:
+                images = F.interpolate(images, size=(target_h, target_w), mode="bilinear", align_corners=False)
+            if masks.size(-2) != target_h or masks.size(-1) != target_w:
+                masks = F.interpolate(masks.float(), size=(target_h, target_w), mode="nearest").to(masks.dtype)
+
+        self.images = images
+        self.masks = masks
         batch_size, _, height, width = images.shape
         # Bump episode id each time we reset to mark a new episode
         self.episode_id = getattr(self, "episode_id", 0) + 1
@@ -133,6 +145,10 @@ class TumorLocalizationEnv:
         boxes = torch.zeros(batch_size, 4, device=self.device, dtype=torch.float32)
 
         if self.initial_mode == "random_corners":
+            if self.resize_shape is not None:
+                # When inputs are resized, start from the full frame to keep coverage consistent
+                boxes[:] = torch.tensor([0.0, 0.0, float(width), float(height)], device=self.device)
+                return boxes
             # Initialize a box that covers 3/4 of the image in both width and height,
             # and place it at a random corner for each element in the batch.
             width_t  = torch.full((batch_size,), float(width),  device=self.device)
@@ -148,6 +164,20 @@ class TumorLocalizationEnv:
             y = torch.where((corners == 0) | (corners == 1), torch.zeros_like(h), height_t - h)
 
             boxes = torch.stack([x, y, w, h], dim=1)
+
+            if getattr(self, "has_tumor", None) is not None:
+                ious = self._calculate_iou(boxes, self.gt_bboxes)
+                needs_adjustment = self.has_tumor & (ious <= 0)
+                if needs_adjustment.any():
+                    gt = self.gt_bboxes[needs_adjustment]
+                    start_x = torch.clamp(gt[:, 0] - self.initial_margin, min=0.0)
+                    start_y = torch.clamp(gt[:, 1] - self.initial_margin, min=0.0)
+                    end_x = torch.clamp(gt[:, 0] + gt[:, 2] + self.initial_margin, max=float(width))
+                    end_y = torch.clamp(gt[:, 1] + gt[:, 3] + self.initial_margin, max=float(height))
+                    adjusted = torch.stack(
+                        [start_x, start_y, end_x - start_x, end_y - start_y], dim=1
+                    )
+                    boxes[needs_adjustment] = adjusted
             return boxes
 
         if self.initial_mode == "full_image":
@@ -190,11 +220,11 @@ class TumorLocalizationEnv:
         cx = x + w / 2
         cy = y + h / 2
 
-        # moves
-        cx = torch.where((actions == 0) & active_mask, torch.minimum(cx + step, width_limit - w/2), cx)
-        cx = torch.where((actions == 1) & active_mask, torch.maximum(cx - step, w/2), cx)
-        cy = torch.where((actions == 2) & active_mask, torch.maximum(cy - step, h/2), cy)
-        cy = torch.where((actions == 3) & active_mask, torch.minimum(cy + step, height_limit - h/2), cy)
+        # moves (0: up, 1: down, 2: left, 3: right)
+        cy = torch.where((actions == 0) & active_mask, torch.maximum(cy - step, h / 2), cy)
+        cy = torch.where((actions == 1) & active_mask, torch.minimum(cy + step, height_limit - h / 2), cy)
+        cx = torch.where((actions == 2) & active_mask, torch.maximum(cx - step, w / 2), cx)
+        cx = torch.where((actions == 3) & active_mask, torch.minimum(cx + step, width_limit - w / 2), cx)
 
         w_new, h_new = w, h
         # scale up
@@ -269,7 +299,7 @@ class TumorLocalizationEnv:
     def _candidate_boxes_all_actions(self) -> torch.Tensor:
         """Return candidate boxes for all 8 non-stop actions, shape (B, 8, 4).
         Actions are center-anchored and symmetric:
-          0: right, 1: left, 2: up, 3: down,
+          0: up, 1: down, 2: left, 3: right,
           4: scale up, 5: scale down,
           6: shrink top/bottom (wider), 7: shrink left/right (taller)
         """
@@ -286,23 +316,23 @@ class TumorLocalizationEnv:
         cx = x + w / 2
         cy = y + h / 2
 
-        # 0: move right
-        cx0 = torch.minimum(cx + step, width_limit - w / 2);  cy0 = cy;  w0 = w;  h0 = h
+        # 0: move up
+        cx0 = cx;  cy0 = torch.maximum(cy - step, h / 2);  w0 = w;  h0 = h
         x0 = torch.clamp(cx0 - w0 / 2, min=torch.zeros_like(cx0), max=width_limit - w0)
         y0 = torch.clamp(cy0 - h0 / 2, min=torch.zeros_like(cy0), max=height_limit - h0)
 
-        # 1: move left
-        cx1 = torch.maximum(cx - step, w / 2);  cy1 = cy;  w1 = w;  h1 = h
+        # 1: move down
+        cx1 = cx;  cy1 = torch.minimum(cy + step, height_limit - h / 2);  w1 = w;  h1 = h
         x1 = torch.clamp(cx1 - w1 / 2, min=torch.zeros_like(cx1), max=width_limit - w1)
         y1 = torch.clamp(cy1 - h1 / 2, min=torch.zeros_like(cy1), max=height_limit - h1)
 
-        # 2: move up
-        cx2 = cx;  cy2 = torch.maximum(cy - step, h / 2);  w2 = w;  h2 = h
+        # 2: move left
+        cx2 = torch.maximum(cx - step, w / 2);  cy2 = cy;  w2 = w;  h2 = h
         x2 = torch.clamp(cx2 - w2 / 2, min=torch.zeros_like(cx2), max=width_limit - w2)
         y2 = torch.clamp(cy2 - h2 / 2, min=torch.zeros_like(cy2), max=height_limit - h2)
 
-        # 3: move down
-        cx3 = cx;  cy3 = torch.minimum(cy + step, height_limit - h / 2);  w3 = w;  h3 = h
+        # 3: move right
+        cx3 = torch.minimum(cx + step, width_limit - w / 2);  cy3 = cy;  w3 = w;  h3 = h
         x3 = torch.clamp(cx3 - w3 / 2, min=torch.zeros_like(cx3), max=width_limit - w3)
         y3 = torch.clamp(cy3 - h3 / 2, min=torch.zeros_like(cy3), max=height_limit - h3)
 
