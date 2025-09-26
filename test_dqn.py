@@ -6,7 +6,7 @@ import torch
 import yaml
 
 import pytorch_lightning as pl
-from data.data_module import BrainTumorDataModule
+from data.data_module import PreprocessedBrainTumorDataModule
 from dqn.environment import TumorLocalizationEnv
 from dqn.lightning_model import DQNLightning
 
@@ -88,8 +88,8 @@ def main():
     print(f"Loading model from: {best_checkpoint_path}")
     model = DQNLightning.load_from_checkpoint(str(best_checkpoint_path))
 
-    data_module = BrainTumorDataModule(
-        data_dir=data_cfg.get("data_dir", "MU-Glioma-Post/"),
+    data_module = PreprocessedBrainTumorDataModule(
+        data_dir=data_cfg.get("data_dir", "preprocessed_data/"),
         batch_size=data_cfg.get("batch_size", 16),
         num_workers=data_cfg.get("num_workers", 0),
         persistent_workers=data_cfg.get("persistent_workers", False),

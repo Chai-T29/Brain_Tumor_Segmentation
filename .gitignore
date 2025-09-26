@@ -53,6 +53,7 @@ dqn_test_episode.gif
 # Datasets (local copies)
 datasets/
 MU-Glioma-Post/
+preprocessed_data
 
 # Model checkpoints / weights
 checkpoints/

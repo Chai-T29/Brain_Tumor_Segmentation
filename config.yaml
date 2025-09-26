@@ -1,7 +1,7 @@
 data:
   data_dir: "MU-Glioma-Post/"
   cache_dir: "preprocessed_data"
-  batch_size: 256
+  batch_size: 64
   num_workers: 4  # Reduced from 8 to save memory
   persistent_workers: true  # Now beneficial with memory mapping
   pin_memory: true
