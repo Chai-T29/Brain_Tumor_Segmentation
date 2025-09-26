@@ -253,7 +253,7 @@ class TumorLocalizationEnv:
         if self.last_iou is None:
             raise RuntimeError("reset before rewards.")
         delta_iou = torch.where(prev_active, current_iou - self.last_iou, torch.zeros_like(current_iou))
-        rewards = 2.5 * delta_iou + 0.5 * torch.where(prev_active, current_iou, torch.zeros_like(current_iou))
+        rewards = 2.5 * delta_iou # + 0.5 * torch.where(prev_active, current_iou, torch.zeros_like(current_iou))
 
         stop_mask = (actions == self._STOP_ACTION) & prev_active
         tumor_present = self.has_tumor & prev_active
