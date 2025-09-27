@@ -28,7 +28,7 @@ class NormalizeSlice:
             mean = image.mean()
             std = image.std().clamp(min=1e-6)
         image = (image - mean) / std
-        image = image.clamp_(-3, 3)
+        image = image.clamp_(-6, 6)
         return {"image": image, "mask": mask}
 
 
@@ -77,7 +77,7 @@ class BrainTumorDataModule(pl.LightningDataModule):
         # ----------------------------
         # Step 1: one-time decompression into memory-mapped arrays
         # ----------------------------
-        cache_dir = os.path.join(self.data_dir, ".cache_mm")
+        cache_dir = os.path.join(self.data_dir, "decompressed")
         os.makedirs(cache_dir, exist_ok=True)
 
         # find all (image, mask) pairs

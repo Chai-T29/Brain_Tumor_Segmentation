@@ -109,6 +109,8 @@ def main():
         initial_mode=env_cfg.get("initial_mode", "random_corners"),
         initial_margin=env_cfg.get("initial_margin", 8.0),
         reward_clip_range=tuple(env_cfg.get("reward_clip_range", [-6.0, 6.0])),
+        delta_iou=env_cfg.get("delta_iou", 2.5),
+        current_iou=env_cfg.get("current_iou", 0.5),
         stop_reward_success=env_cfg.get("stop_reward_success", 4.0),
         stop_reward_no_tumor=env_cfg.get("stop_reward_no_tumor", 2.0),
         stop_reward_false=env_cfg.get("stop_reward_false", -3.0),

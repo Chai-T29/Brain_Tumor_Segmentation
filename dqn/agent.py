@@ -35,7 +35,7 @@ class DQNAgent:
         self.policy_net = policy_net
         self.target_net = target_net
 
-        self.memory = PrioritizedReplayMemory(memory_size)
+        self.memory = PrioritizedReplayMemory(memory_size, device=self.device)
         self.current_epsilon = max(0.0, epsilon_start)
         self.global_step = 0
         self.n_step = 3
@@ -193,7 +193,7 @@ class DQNAgent:
         if len(self.memory) < sample_n:
             return None
 
-        sampled = self.memory.sample(sample_n, beta=self.beta)
+        sampled = self.memory.sample(sample_n, beta=self.beta, device=self.device)
         if isinstance(sampled, tuple):
             experiences, indices, weights = sampled
         else:

@@ -93,6 +93,9 @@ class DQNLightning(pl.LightningModule):
         losses = []
         active_mask = torch.ones(batch_size, dtype=torch.bool, device=self.device)
         action_counts = torch.zeros(self.agent.num_actions, device=self.device)
+        final_ious = []  # IoUs captured at the moment rows reach done
+        active_mask = torch.ones(batch_size, dtype=torch.bool, device=self.device)
+        action_counts = torch.zeros(self.agent.num_actions, device=self.device)
 
         for _ in range(self.hparams.max_steps):
             actions = self.agent.select_action(state, self.train_env)
@@ -107,6 +110,8 @@ class DQNLightning(pl.LightningModule):
             cumulative_rewards += rewards_device
             steps_taken += active_mask.float()
             iou_values.append(info["iou"].to(self.device))
+            if done.any():
+                final_ious.append(info["iou"][done].to(self.device))
 
             state_images_cpu = state[0].detach().cpu()
             state_bboxes_cpu = state[1].detach().cpu()
@@ -153,6 +158,22 @@ class DQNLightning(pl.LightningModule):
         epsilon_tensor = torch.tensor(self.agent.current_epsilon, device=self.device)
         step_time_tensor = torch.tensor(step_time, device=self.device)
 
+        if final_ious:
+            final_iou_all = torch.cat(final_ious)
+            final_iou_mean = final_iou_all.mean()
+            final_iou_median = final_iou_all.median()
+            final_iou_ge_04 = (final_iou_all >= 0.4).float().mean()
+            final_iou_ge_thresh = (final_iou_all >= torch.tensor(self.hparams.iou_threshold, device=self.device)).float().mean()
+        else:
+            final_iou_mean = torch.tensor(0.0, device=self.device)
+            final_iou_median = torch.tensor(0.0, device=self.device)
+            final_iou_ge_04 = torch.tensor(0.0, device=self.device)
+            final_iou_ge_thresh = torch.tensor(0.0, device=self.device)
+
+        self.log("train/final_iou_mean", final_iou_mean, on_epoch=True, sync_dist=True)
+        self.log("train/final_iou_median", final_iou_median, on_epoch=True, sync_dist=True)
+        self.log("train/final_iou_ge_0.4_pct", final_iou_ge_04, on_epoch=True, sync_dist=True)
+        self.log("train/final_iou_ge_thresh_pct", final_iou_ge_thresh, on_epoch=True, sync_dist=True)
         self.log("train/episode_reward", avg_reward, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("train/episode_length", avg_length, on_epoch=True, sync_dist=True)
         self.log("train/loss", mean_loss, on_epoch=True, prog_bar=True, sync_dist=True)
@@ -200,27 +221,27 @@ class DQNLightning(pl.LightningModule):
         )
         self._log_metrics(metrics, prefix="test")
 
-        action_counts = np.zeros(9)
+        #action_counts = np.zeros(9)
         if record and frames:
             reward_value = metrics["avg_reward"].item()
             gif_name = f"episode_{self._test_episode_index:03d}_reward_{reward_value:.2f}.gif"
             imageio.mimsave(self._gif_output_dir / gif_name, frames, fps=self.hparams.test_gif_fps)
             self._test_episode_index += 1
 
-            action_counts = action_counts + metrics["action_counts"].cpu().numpy()
+            #action_counts = action_counts + metrics["action_counts"].cpu().numpy()
 
         # Generate and save histogram of action counts
-        plt.figure(figsize=(8, 6))
-        plt.bar(range(len(action_counts)), action_counts)
-        plt.xlabel("Action")
-        plt.ylabel("Frequency")
-        plt.title("Action Counts Histogram")
-        plt.tight_layout()
-        hist_dir = self._gif_output_dir.parent
-        hist_dir.mkdir(parents=True, exist_ok=True)
-        hist_filename = hist_dir / f"action_counts.png"
-        plt.savefig(hist_filename)
-        plt.close()
+        # plt.figure(figsize=(8, 6))
+        # plt.bar(range(len(action_counts)), action_counts)
+        # plt.xlabel("Action")
+        # plt.ylabel("Frequency")
+        # plt.title("Action Counts Histogram")
+        # plt.tight_layout()
+        # hist_dir = self._gif_output_dir.parent
+        # hist_dir.mkdir(parents=True, exist_ok=True)
+        # hist_filename = hist_dir / f"action_counts.png"
+        # plt.savefig(hist_filename)
+        # plt.close()
 
         return metrics
 
@@ -253,6 +274,7 @@ class DQNLightning(pl.LightningModule):
         active_mask = torch.ones(batch_size, dtype=torch.bool, device=self.device)
         frames = []
         action_counts = torch.zeros(self.agent.num_actions, device=self.device)
+        final_ious = []  # IoUs captured at the moment rows reach done
 
         if record:
             frames.append(env.render(index=0, mode="rgb_array"))
@@ -269,6 +291,9 @@ class DQNLightning(pl.LightningModule):
             cumulative_rewards += rewards_device
             steps_taken += active_mask.float()
             iou_values.append(info["iou"].to(self.device))
+            # Track IoU at the moment rows reach done
+            if done.any():
+                final_ious.append(info["iou"][done].to(self.device))
 
             state = next_state
 
@@ -285,6 +310,18 @@ class DQNLightning(pl.LightningModule):
             "mean_iou": torch.cat(iou_values).mean() if iou_values else torch.tensor(0.0, device=self.device),
             "action_counts": action_counts,
         }
+        # Add final IoU stats
+        if final_ious:
+            final_iou_all = torch.cat(final_ious)
+            metrics["final_iou_mean"] = final_iou_all.mean()
+            metrics["final_iou_median"] = final_iou_all.median()
+            metrics["final_iou_ge_0.4_pct"] = (final_iou_all >= 0.4).float().mean()
+            metrics["final_iou_ge_thresh_pct"] = (final_iou_all >= torch.tensor(self.hparams.iou_threshold, device=self.device)).float().mean()
+        else:
+            metrics["final_iou_mean"] = torch.tensor(0.0, device=self.device)
+            metrics["final_iou_median"] = torch.tensor(0.0, device=self.device)
+            metrics["final_iou_ge_0.4_pct"] = torch.tensor(0.0, device=self.device)
+            metrics["final_iou_ge_thresh_pct"] = torch.tensor(0.0, device=self.device)
         return metrics, frames if record else None
 
     def _log_metrics(self, metrics, prefix: str) -> None:
