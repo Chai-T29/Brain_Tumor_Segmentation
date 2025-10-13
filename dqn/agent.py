@@ -35,7 +35,7 @@ class DQNAgent:
         self.policy_net = policy_net
         self.target_net = target_net
 
-        self.memory = PrioritizedReplayMemory(memory_size, device=self.device)
+        self.memory = PrioritizedReplayMemory(memory_size, device=torch.device("cpu"))
         self.current_epsilon = max(0.0, epsilon_start)
         self.global_step = 0
         self.n_step = 3
