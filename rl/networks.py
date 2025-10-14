@@ -23,7 +23,7 @@ def _build_mlp(input_dim: int, hidden_sizes: Sequence[int], output_dim: int, las
 class Actor(nn.Module):
     """Deterministic policy network for TD3."""
 
-    def __init__(self, embedding_dim: int, polygon_dim: int, action_dim: int, hidden_sizes: Iterable[int] = (512, 512)) -> None:
+    def __init__(self, embedding_dim: int, polygon_dim: int, action_dim: int, hidden_sizes: Iterable[int]) -> None:
         super().__init__()
         input_dim = embedding_dim + polygon_dim
         self.net = _build_mlp(input_dim, tuple(hidden_sizes), action_dim)
@@ -39,7 +39,7 @@ class Critic(nn.Module):
     Both Q-functions share the same input but maintain independent parameters.
     """
 
-    def __init__(self, embedding_dim: int, polygon_dim: int, action_dim: int, hidden_sizes: Iterable[int] = (512, 512)) -> None:
+    def __init__(self, embedding_dim: int, polygon_dim: int, action_dim: int, hidden_sizes: Iterable[int]) -> None:
         super().__init__()
         input_dim = embedding_dim + polygon_dim + action_dim
         self.q1 = _build_mlp(input_dim, tuple(hidden_sizes), 1)

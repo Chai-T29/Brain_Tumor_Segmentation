@@ -47,6 +47,8 @@ algorithm:
   target_policy_noise_clip: 0.5
   max_grad_norm: 10.0
   embedding_noise_std: 0.01
+  actor_hidden_sizes: [512, 512]
+  critic_hidden_sizes: [512, 512]
   replay_capacity: 100000
 
 training:

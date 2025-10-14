@@ -43,6 +43,10 @@ class TD3Lightning(pl.LightningModule):
         algo_cfg = dict(algo_cfg)
         if "exploration_noise" in algo_cfg and isinstance(algo_cfg["exploration_noise"], dict):
             algo_cfg["exploration_noise"] = NoiseScheduleConfig(**algo_cfg["exploration_noise"])
+        if "actor_hidden_sizes" in algo_cfg:
+            algo_cfg["actor_hidden_sizes"] = tuple(algo_cfg["actor_hidden_sizes"])
+        if "critic_hidden_sizes" in algo_cfg:
+            algo_cfg["critic_hidden_sizes"] = tuple(algo_cfg["critic_hidden_sizes"])
         self.algo_config = TD3Config(**algo_cfg)
         self.training_config = TrainingConfig(**training_cfg)
 

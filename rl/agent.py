@@ -30,6 +30,8 @@ class TD3Config:
     target_policy_noise_clip: float = 0.5
     max_grad_norm: float = 10.0
     embedding_noise_std: float = 0.01
+    actor_hidden_sizes: tuple[int, ...] = (512, 512)
+    critic_hidden_sizes: tuple[int, ...] = (512, 512)
 
 
 class TD3Agent:
@@ -46,12 +48,12 @@ class TD3Agent:
         self.config = config
         self.device = device or torch.device("cpu")
 
-        self.actor = Actor(embedding_dim, polygon_dim, action_dim).to(self.device)
-        self.actor_target = Actor(embedding_dim, polygon_dim, action_dim).to(self.device)
+        self.actor = Actor(embedding_dim, polygon_dim, action_dim, self.config.actor_hidden_sizes).to(self.device)
+        self.actor_target = Actor(embedding_dim, polygon_dim, action_dim, self.config.actor_hidden_sizes).to(self.device)
         self.actor_target.load_state_dict(self.actor.state_dict())
 
-        self.critic = Critic(embedding_dim, polygon_dim, action_dim).to(self.device)
-        self.critic_target = Critic(embedding_dim, polygon_dim, action_dim).to(self.device)
+        self.critic = Critic(embedding_dim, polygon_dim, action_dim, self.config.critic_hidden_sizes).to(self.device)
+        self.critic_target = Critic(embedding_dim, polygon_dim, action_dim, self.config.critic_hidden_sizes).to(self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
 
         self.actor_opt = optim.Adam(self.actor.parameters(), lr=config.actor_lr)
