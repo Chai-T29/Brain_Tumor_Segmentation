@@ -33,11 +33,12 @@ def test_td3_agent_action_bounds():
     assert torch.all(deterministic_action <= 1.0 + 1e-6)
     assert torch.all(deterministic_action >= -1.0 - 1e-6)
 
-    agent._exploration_steps = 0
+    agent.set_warmup_steps(0)
+    agent._interaction_count = 0
     sigma_start = agent._current_exploration_sigma()
-    agent._exploration_steps = 5
+    agent._interaction_count = 5
     sigma_mid = agent._current_exploration_sigma()
-    agent._exploration_steps = 15
+    agent._interaction_count = 15
     sigma_end = agent._current_exploration_sigma()
 
     assert sigma_start > sigma_mid >= sigma_end
@@ -66,3 +67,19 @@ def test_replay_buffer_sample_shapes():
     assert batch["discount"].shape == (4, 1)
     assert batch["next_polygon"].shape == (4, 6)
     assert batch["done"].shape == (4, 1)
+
+
+def test_warmup_keeps_sigma_constant():
+    config = TD3Config(
+        exploration_noise=NoiseScheduleConfig(sigma_init=0.5, sigma_final=0.1, steps=10),
+        embedding_noise_std=0.0,
+    )
+    agent = TD3Agent(embedding_dim=2, polygon_dim=2, action_dim=1, config=config)
+    agent.set_warmup_steps(20)
+
+    agent._interaction_count = 0
+    start_sigma = agent._current_exploration_sigma()
+    agent._interaction_count = 10
+    mid_sigma = agent._current_exploration_sigma()
+
+    assert start_sigma == mid_sigma == config.exploration_noise.sigma_init

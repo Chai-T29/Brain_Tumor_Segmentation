@@ -58,7 +58,8 @@ class TD3Agent:
         self.critic_opt = optim.Adam(self.critic.parameters(), lr=config.critic_lr)
 
         self.total_updates = 0
-        self._exploration_steps = 0
+        self._interaction_count = 0
+        self.warmup_steps = 0
 
     def to(self, device: torch.device) -> "TD3Agent":
         self.device = device
@@ -90,7 +91,7 @@ class TD3Agent:
             if sigma > 0:
                 noise = torch.randn_like(action) * sigma
                 action = action + noise
-            self._exploration_steps += embedding.size(0)
+            self._interaction_count += embedding.size(0)
         return action.clamp_(-1.0, 1.0)
 
     def update(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
@@ -156,7 +157,13 @@ class TD3Agent:
 
     def _current_exploration_sigma(self) -> float:
         schedule = self.config.exploration_noise
+        if self._interaction_count < self.warmup_steps:
+            return float(schedule.sigma_init)
+        progressed = self._interaction_count - self.warmup_steps
         if schedule.steps <= 0:
-            return max(schedule.sigma_final, 0.0)
-        progress = min(1.0, self._exploration_steps / float(schedule.steps))
+            return float(schedule.sigma_final)
+        progress = min(1.0, progressed / float(schedule.steps))
         return float(schedule.sigma_init + (schedule.sigma_final - schedule.sigma_init) * progress)
+
+    def set_warmup_steps(self, warmup_steps: int) -> None:
+        self.warmup_steps = max(0, int(warmup_steps))

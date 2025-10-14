@@ -53,6 +53,7 @@ class TD3Lightning(pl.LightningModule):
             action_dim=self.environment.action_dim,
             config=self.algo_config,
         )
+        self.agent.set_warmup_steps(self.training_config.warmup_steps)
 
         self.replay = ReplayBuffer(
             capacity=replay_capacity,
@@ -186,16 +187,15 @@ class TD3Lightning(pl.LightningModule):
         critic_losses = []
         actor_losses = []
         performed_updates = 0
-        if self._global_step_interactions >= self.training_config.warmup_steps:
-            for _ in range(updates_to_run):
-                if len(self.replay) < self.training_config.update_batch_size:
-                    break
-                batch_samples = self.replay.sample(self.training_config.update_batch_size, device=self.device)
-                metrics = self.agent.update(batch_samples)
-                critic_losses.append(metrics["critic_loss"])
-                if "actor_loss" in metrics:
-                    actor_losses.append(metrics["actor_loss"])
-                performed_updates += 1
+        for _ in range(updates_to_run):
+            if len(self.replay) < self.training_config.update_batch_size:
+                break
+            batch_samples = self.replay.sample(self.training_config.update_batch_size, device=self.device)
+            metrics = self.agent.update(batch_samples)
+            critic_losses.append(metrics["critic_loss"])
+            if "actor_loss" in metrics:
+                actor_losses.append(metrics["actor_loss"])
+            performed_updates += 1
 
         mean_critic_loss = float(sum(critic_losses) / len(critic_losses)) if critic_losses else 0.0
         mean_actor_loss = float(sum(actor_losses) / len(actor_losses)) if actor_losses else 0.0
