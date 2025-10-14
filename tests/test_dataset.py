@@ -43,6 +43,14 @@ def test_datamodule_exposes_negative_samples_when_enabled(tmp_path):
         val_split=0.0,
         test_split=0.0,
         include_empty_masks=True,
+        encoder_config={
+            "name": "efficientnet_b0",
+            "pretrained": False,
+            "trainable": False,
+            "embedding_noise_std": 0.0,
+        },
+        embedding_batch_size=1,
+        embedding_device="cpu",
     )
 
     data_module.setup()

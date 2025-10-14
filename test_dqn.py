@@ -47,7 +47,6 @@ def evaluate(model: TD3Lightning, datamodule: BrainTumorDataModule, device: torc
 
     env = PolygonLocalizationEnv(EnvironmentConfig(**model.hparams["env_cfg"]))
     agent = model.agent.to(device)
-    encoder = model.encoder.to(device)
 
     total_success = 0.0
     total_iou = 0.0
@@ -57,9 +56,7 @@ def evaluate(model: TD3Lightning, datamodule: BrainTumorDataModule, device: torc
     for batch in test_loader:
         images = batch["image"].to(device)
         masks = batch["mask"].to(device)
-
-        with torch.no_grad():
-            embeddings = encoder.embed_without_noise(images)
+        embeddings = batch["embedding"].to(device)
 
         polygon_state_cpu = env.reset(images.cpu(), masks.cpu())
         polygon_state = polygon_state_cpu.to(device)
@@ -125,6 +122,9 @@ def main() -> None:
         test_split=data_cfg.get("test_split", 0.1),
         seed=config.get("seed", 42),
         include_empty_masks=data_cfg.get("include_empty_masks", False),
+        encoder_config=config.get("encoder", {}),
+        embedding_batch_size=data_cfg.get("embedding_batch_size", 128),
+        embedding_device=data_cfg.get("embedding_device"),
     )
 
     log_dir = Path(logging_cfg.get("log_dir", "lightning_logs"))

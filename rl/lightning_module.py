@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Dict, Optional, Tuple, List
+from typing import Any, Dict, Optional, Tuple, List
 
 import numpy as np
 import pytorch_lightning as pl
@@ -10,7 +10,6 @@ import torch
 import imageio.v2 as imageio
 
 from .agent import TD3Agent, TD3Config, NoiseScheduleConfig
-from .encoder import build_encoder, EncoderConfig, EfficientNetEncoder
 from .environment import EnvironmentConfig, PolygonLocalizationEnv
 from .n_step import NStepAccumulator, StepTuple
 from .replay_buffer import ReplayBuffer, Transition
@@ -30,7 +29,7 @@ class TrainingConfig:
 class TD3Lightning(pl.LightningModule):
     def __init__(
         self,
-        encoder_cfg: Dict,
+        embedding_dim: int,
         env_cfg: Dict,
         algo_cfg: Dict,
         training_cfg: Dict,
@@ -40,7 +39,9 @@ class TD3Lightning(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
 
-        self.encoder, self.encoder_config = build_encoder(encoder_cfg)
+        if embedding_dim <= 0:
+            raise ValueError("embedding_dim must be a positive integer")
+        self.embedding_dim = int(embedding_dim)
         self.env_config = EnvironmentConfig(**env_cfg)
         self.environment = PolygonLocalizationEnv(self.env_config)
         env_config_copy = EnvironmentConfig(**asdict(self.env_config))
@@ -65,7 +66,7 @@ class TD3Lightning(pl.LightningModule):
 
         polygon_dim = self.env_config.num_sides * 4
         self.agent = TD3Agent(
-            embedding_dim=self.encoder.embedding_dim,
+            embedding_dim=self.embedding_dim,
             polygon_dim=polygon_dim,
             action_dim=self.environment.action_dim,
             config=self.algo_config,
@@ -74,7 +75,7 @@ class TD3Lightning(pl.LightningModule):
 
         self.replay = ReplayBuffer(
             capacity=replay_capacity,
-            embedding_dim=self.encoder.embedding_dim,
+            embedding_dim=self.embedding_dim,
             polygon_dim=polygon_dim,
             action_dim=self.environment.action_dim,
         )
@@ -84,15 +85,12 @@ class TD3Lightning(pl.LightningModule):
 
     def on_fit_start(self) -> None:
         self.agent.to(self.device)
-        self.encoder.to(self.device)
 
     def on_validation_start(self) -> None:
         self.agent.to(self.device)
-        self.encoder.to(self.device)
 
     def on_test_start(self) -> None:
         self.agent.to(self.device)
-        self.encoder.to(self.device)
 
     def on_save_checkpoint(self, checkpoint: Dict[str, any]) -> None:
         checkpoint["actor_opt_state"] = self.agent.actor_opt.state_dict()
@@ -115,9 +113,7 @@ class TD3Lightning(pl.LightningModule):
         masks = batch["mask"].to(self.device, non_blocking=True)
         batch_size = images.size(0)
 
-        # Compute base embeddings without augmentation.
-        with torch.no_grad():
-            embeddings = self.encoder.embed_without_noise(images)
+        embeddings = batch["embedding"].to(self.device, non_blocking=True)
         embeddings_cpu = embeddings.detach().cpu()
 
         polygon_state_cpu = self.environment.reset(images.cpu(), masks.cpu())
@@ -273,7 +269,16 @@ class TD3Lightning(pl.LightningModule):
 
         if record and frames:
             reward_value = metrics["avg_reward"].detach().cpu().item()
-            gif_name = f"episode_{self._test_episode_index:03d}_reward_{reward_value:.2f}.gif"
+            meta_batch = batch.get("meta") if isinstance(batch, dict) else None
+            identifier = self._resolve_meta_value(meta_batch, "group_key")
+            slice_idx = self._resolve_meta_value(meta_batch, "slice_index")
+            if identifier is None:
+                identifier = f"episode_{self._test_episode_index:03d}"
+            if slice_idx is None:
+                slice_idx = self._test_episode_index
+            gif_name = (
+                f"{identifier}_slice_{int(slice_idx):03d}_reward_{reward_value:.2f}.gif"
+            )
             imageio.mimsave(self._gif_output_dir / gif_name, frames, fps=self.test_gif_fps)
             self._test_episode_index += 1
 
@@ -296,9 +301,7 @@ class TD3Lightning(pl.LightningModule):
     ) -> Tuple[Dict[str, torch.Tensor], Optional[List[np.ndarray]]]:
         images = batch["image"].to(self.device, non_blocking=True)
         masks = batch["mask"].to(self.device, non_blocking=True)
-
-        with torch.no_grad():
-            embeddings = self.encoder.embed_without_noise(images)
+        embeddings = batch["embedding"].to(self.device, non_blocking=True)
 
         state_cpu = env.reset(images.cpu(), masks.cpu())
         state = state_cpu.to(self.device)
@@ -372,3 +375,20 @@ class TD3Lightning(pl.LightningModule):
                 sync_dist=False,
                 add_dataloader_idx=False,
             )
+
+    @staticmethod
+    def _resolve_meta_value(meta_batch: Optional[Dict[str, Any]], key: str) -> Optional[Any]:
+        if not isinstance(meta_batch, dict):
+            return None
+        value = meta_batch.get(key)
+        if value is None:
+            return None
+        if isinstance(value, (list, tuple)):
+            if not value:
+                return None
+            value = value[0]
+        if isinstance(value, torch.Tensor):
+            if value.numel() == 0:
+                return None
+            return value.flatten()[0].item()
+        return value
