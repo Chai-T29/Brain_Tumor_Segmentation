@@ -2,7 +2,7 @@ seed: 42
 
 data:
   data_dir: "MU-Glioma-Post/"
-  batch_size: 1024
+  batch_size: 2048
   num_workers: 8
   persistent_workers: true
   pin_memory: false

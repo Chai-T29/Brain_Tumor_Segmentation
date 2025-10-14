@@ -20,3 +20,6 @@ def test_measure_bottlenecks_identifies_actor_critic_dominance():
     assert result["actor_critic_time"] >= 0.0
     assert result["other_time"] >= 0.0
     assert result["bottleneck"] == "actor_critic_time"
+
+if __name__ == "__main__":
+    test_measure_bottlenecks_identifies_actor_critic_dominance()
