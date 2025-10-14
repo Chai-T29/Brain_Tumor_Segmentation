@@ -29,7 +29,7 @@ def test_reset_returns_expected_shape():
     images = torch.zeros(2, 1, 32, 32)
     masks = torch.zeros(2, 1, 32, 32)
     state = env.reset(images, masks)
-    assert state.shape == (2, env.config.num_sides * 3)
+    assert state.shape == (2, env.config.num_sides * 4)
 
 
 def test_stop_action_success_reward():
@@ -78,4 +78,4 @@ def test_actions_keep_vertices_within_bounds():
     assert vertices[..., 0].max().item() <= 31.0
     assert vertices[..., 1].min().item() >= 0.0
     assert vertices[..., 1].max().item() <= 31.0
-    assert state.shape == (1, env.config.num_sides * 3)
+    assert state.shape == (1, env.config.num_sides * 4)

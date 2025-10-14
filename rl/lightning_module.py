@@ -94,6 +94,18 @@ class TD3Lightning(pl.LightningModule):
         self.agent.to(self.device)
         self.encoder.to(self.device)
 
+    def on_save_checkpoint(self, checkpoint: Dict[str, any]) -> None:
+        checkpoint["actor_opt_state"] = self.agent.actor_opt.state_dict()
+        checkpoint["critic_opt_state"] = self.agent.critic_opt.state_dict()
+
+    def on_load_checkpoint(self, checkpoint: Dict[str, any]) -> None:
+        actor_state = checkpoint.get("actor_opt_state")
+        critic_state = checkpoint.get("critic_opt_state")
+        if actor_state is not None:
+            self.agent.actor_opt.load_state_dict(actor_state)
+        if critic_state is not None:
+            self.agent.critic_opt.load_state_dict(critic_state)
+
     def configure_optimizers(self):
         # Optimisers are managed internally by the agent.
         return []

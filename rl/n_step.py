@@ -32,41 +32,9 @@ class NStepAccumulator:
         buffer.append(step)
         transitions: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]] = []
 
-        def _pop_transition() -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
-            if not buffer:
-                raise RuntimeError("Attempted to pop from an empty buffer.")
-            reward_acc = torch.zeros_like(buffer[0].reward)
-            device = buffer[0].reward.device
-            discount = torch.tensor(1.0, dtype=buffer[0].reward.dtype, device=device)
-            next_polygon = None
-            done_flag = torch.zeros_like(buffer[0].done)
-
-            steps = min(self.n_step, len(buffer))
-            for i in range(steps):
-                item = buffer[i]
-                reward_acc = reward_acc + (self.gamma ** i) * item.reward
-                if item.done.bool().item():
-                    done_flag = item.done
-                    next_polygon = item.next_polygon
-                    discount = torch.tensor(0.0, dtype=buffer[0].reward.dtype, device=device)
-                    steps = i + 1
-                    break
-            else:
-                next_item = buffer[steps - 1]
-                next_polygon = next_item.next_polygon
-                discount = torch.tensor(self.gamma ** steps, dtype=buffer[0].reward.dtype, device=device)
-
-            first = buffer.popleft()
-            return first.embedding, first.polygon, first.action, reward_acc, next_polygon, done_flag, discount
-
         while buffer and (len(buffer) >= self.n_step or buffer[0].done.bool().item()):
-            embedding, polygon, action, reward_acc, next_polygon, done_flag, discount = _pop_transition()
+            embedding, polygon, action, reward_acc, next_polygon, done_flag, discount = self._pop_transition(buffer, allow_partial=False)
             transitions.append((embedding, polygon, action, reward_acc, next_polygon, done_flag, discount))
-
-        if buffer and buffer[0].done.bool().item():
-            while buffer:
-                embedding, polygon, action, reward_acc, next_polygon, done_flag, discount = _pop_transition()
-                transitions.append((embedding, polygon, action, reward_acc, next_polygon, done_flag, discount))
 
         return transitions
 
@@ -74,17 +42,46 @@ class NStepAccumulator:
         buffer = self.buffers[env_idx]
         transitions: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]] = []
         while buffer:
-            item = buffer.popleft()
-            done_tensor = torch.ones_like(item.done)
-            transitions.append(
-                (
-                    item.embedding,
-                    item.polygon,
-                    item.action,
-                    item.reward,
-                    item.next_polygon,
-                    done_tensor,
-                    torch.tensor(0.0, dtype=item.reward.dtype, device=item.reward.device),
-                )
-            )
+            embedding, polygon, action, reward_acc, next_polygon, done_flag, discount = self._pop_transition(buffer, allow_partial=True)
+            transitions.append((embedding, polygon, action, reward_acc, next_polygon, done_flag, discount))
         return transitions
+
+    def _pop_transition(
+        self,
+        buffer: Deque[StepTuple],
+        allow_partial: bool,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+        if not buffer:
+            raise RuntimeError("Attempted to pop from an empty buffer.")
+
+        reward_acc = torch.zeros_like(buffer[0].reward)
+        device = buffer[0].reward.device
+        dtype = buffer[0].reward.dtype
+        discount = torch.tensor(1.0, dtype=dtype, device=device)
+        next_polygon = None
+        done_flag = torch.zeros_like(buffer[0].done)
+
+        max_horizon = min(self.n_step, len(buffer))
+        for i in range(max_horizon):
+            item = buffer[i]
+            reward_acc = reward_acc + (self.gamma ** i) * item.reward
+            if item.done.bool().item():
+                done_flag = item.done
+                next_polygon = item.next_polygon
+                discount = torch.tensor(0.0, dtype=dtype, device=device)
+                max_horizon = i + 1
+                break
+        else:
+            tail_item = buffer[max_horizon - 1]
+            next_polygon = tail_item.next_polygon
+            if next_polygon is not None:
+                discount = torch.tensor(self.gamma ** max_horizon, dtype=dtype, device=device)
+            else:
+                # No next state available, treat as terminal.
+                discount = torch.tensor(0.0, dtype=dtype, device=device)
+
+        if not allow_partial and len(buffer) < self.n_step and not done_flag.bool().item():
+            raise RuntimeError("Insufficient steps to pop transition without partial allowance.")
+
+        first = buffer.popleft()
+        return first.embedding, first.polygon, first.action, reward_acc, next_polygon, done_flag, discount

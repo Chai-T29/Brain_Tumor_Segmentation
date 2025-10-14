@@ -88,8 +88,7 @@ The script loads the most recent checkpoint, rolls out deterministic policies (n
 
 ## References
 
-## References
-1. Yarats, Denis, et al. "Mastering visual continuous control: Improved data-augmented reinforcement learning." arXiv preprint arXiv:2107.09645 (2021).
-2. Fujimoto, Scott, Herke Hoof, and David Meger. "Addressing function approximation error in actor-critic methods." International conference on machine learning. PMLR, 2018.
-3. Tan, Mingxing, and Quoc Le. "Efficientnet: Rethinking model scaling for convolutional neural networks." International conference on machine learning. PMLR, 2019.
-4. Yaseen, D., Garrett, F., Gass, J., Greaser, J., Isufi, E., Layfield, L. J., Nada, A., Porgorzelski, K., Sinclair, J., Tahon, N. H. M., & Thacker, J. (2025). University of Missouri Post-operative Glioma Dataset (MU-Glioma-Post) (Version 1) [Data set]. The Cancer Imaging Archive. https://doi.org/10.7937/7K9K-3C83
+1. Yarats, D., Kostrikov, I., & Fergus, R. “Image Augmentation Is All You Need: Regularizing Deep Reinforcement Learning from Pixels.” *ICLR*, 2021.
+2. Fujimoto, S., van Hoof, H., & Meger, D. “Addressing Function Approximation Error in Actor-Critic Methods.” *ICML*, 2018.
+3. Tan, M. & Le, Q. V. “EfficientNet: Rethinking Model Scaling for Convolutional Neural Networks.” *ICML*, 2019.
+4. Yaseen, D. et al. “University of Missouri Post-operative Glioma Dataset (MU-Glioma-Post).” *The Cancer Imaging Archive*, 2025.

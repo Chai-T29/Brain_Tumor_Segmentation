@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch import optim
 
@@ -34,7 +35,7 @@ class TD3Config:
     critic_hidden_sizes: tuple[int, ...] = (512, 512)
 
 
-class TD3Agent:
+class TD3Agent(nn.Module):
     """TD3 agent with optional embedding noise to emulate DrQ-style augmentation."""
 
     def __init__(
@@ -45,6 +46,7 @@ class TD3Agent:
         config: TD3Config,
         device: torch.device | None = None,
     ) -> None:
+        super().__init__()
         self.config = config
         self.device = device or torch.device("cpu")
 
@@ -63,13 +65,14 @@ class TD3Agent:
         self._interaction_count = 0
         self.warmup_steps = 0
 
-    def to(self, device: torch.device) -> "TD3Agent":
-        self.device = device
-        self.actor.to(device)
-        self.actor_target.to(device)
-        self.critic.to(device)
-        self.critic_target.to(device)
-        return self
+    def to(self, *args, **kwargs):
+        module = super().to(*args, **kwargs)
+        device_arg = kwargs.get("device", None)
+        if device_arg is None and len(args) == 1:
+            device_arg = args[0]
+        if isinstance(device_arg, torch.device):
+            self.device = device_arg
+        return module
 
     def _augment_embedding(self, embedding: torch.Tensor) -> torch.Tensor:
         if self.config.embedding_noise_std <= 0:

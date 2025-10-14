@@ -2,7 +2,7 @@ seed: 42
 
 data:
   data_dir: "MU-Glioma-Post/"
-  batch_size: 32
+  batch_size: 1024
   num_workers: 8
   persistent_workers: true
   pin_memory: false
@@ -19,7 +19,7 @@ encoder:
 
 environment:
   num_sides: 32
-  max_steps: 60
+  max_steps: 100
   iou_threshold: 0.7
   initial_radius: 90.0
   radial_step_scale: 8.0
@@ -47,8 +47,8 @@ algorithm:
   target_policy_noise_clip: 0.5
   max_grad_norm: 10.0
   embedding_noise_std: 0.01
-  actor_hidden_sizes: [512, 512]
-  critic_hidden_sizes: [512, 512]
+  actor_hidden_sizes: [256, 128]
+  critic_hidden_sizes: [256, 128]
   replay_capacity: 100000
 
 training:
