@@ -1,9 +1,11 @@
-import torch
-from torch.utils.data import Dataset
 import os
+from typing import Any, Dict
+
 import nibabel as nib
 import numpy as np
+import torch
 import torch.nn.functional as F
+from torch.utils.data import Dataset
 
 class BrainTumorDataset(Dataset):
     """Brain Tumor Segmentation Dataset.
@@ -72,7 +74,38 @@ class BrainTumorDataset(Dataset):
         if torch.is_tensor(idx):
             idx = idx.tolist()
 
-        image_path, mask_path, slice_idx = self.samples[idx]
+        entry = self.samples[idx]
+        if isinstance(entry, dict):
+            image_path = entry.get("image_path")
+            mask_path = entry.get("mask_path")
+            embedding_path = entry.get("embedding_path")
+            slice_idx = int(entry.get("slice_index", 0))
+            meta = dict(entry.get("meta", {}))
+        else:
+            embedding_path = None
+            if len(entry) == 3:
+                image_path, mask_path, slice_idx = entry
+                meta = {
+                    "image_path": image_path,
+                    "mask_path": mask_path,
+                    "slice_index": int(slice_idx),
+                }
+            elif len(entry) == 4:
+                image_path, mask_path, slice_idx, embedding_path = entry
+                meta = {
+                    "image_path": image_path,
+                    "mask_path": mask_path,
+                    "slice_index": int(slice_idx),
+                    "embedding_path": embedding_path,
+                }
+            else:
+                image_path, mask_path, slice_idx, embedding_path, meta = entry
+                if not isinstance(meta, dict):
+                    meta = {
+                        "image_path": image_path,
+                        "mask_path": mask_path,
+                        "slice_index": int(slice_idx),
+                    }
 
         # Transparent support for memmap-backed `.npy` or legacy `.nii.gz`
         if image_path.endswith('.npy') and mask_path.endswith('.npy'):
@@ -91,17 +124,32 @@ class BrainTumorDataset(Dataset):
 
         image = torch.from_numpy(np.asarray(image_slice).copy()).float().unsqueeze(0)
         mask  = torch.from_numpy(np.asarray(mask_slice).copy()).float().unsqueeze(0)
-        
-        if self.resize_shape is not None:
-            image = F.interpolate(image.unsqueeze(0), size=self.resize_shape, mode="bilinear", align_corners=False).squeeze(0)
-            mask = F.interpolate(mask.unsqueeze(0), size=self.resize_shape, mode="nearest").squeeze(0)
 
-        meta = {
-            "image_path": image_path,
-            "mask_path": mask_path,
-            "slice_index": int(slice_idx),
-        }
-        sample = {"image": image, "mask": mask, "meta": meta}
+        if self.resize_shape is not None:
+            image = F.interpolate(
+                image.unsqueeze(0),
+                size=self.resize_shape,
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(0)
+            mask = F.interpolate(
+                mask.unsqueeze(0), size=self.resize_shape, mode="nearest"
+            ).squeeze(0)
+
+        meta.setdefault("image_path", image_path)
+        meta.setdefault("mask_path", mask_path)
+        meta["slice_index"] = int(slice_idx)
+
+        sample: Dict[str, Any] = {"image": image, "mask": mask, "meta": meta}
+
+        if embedding_path:
+            embedding_vol = self._get_memmap(embedding_path)
+            embedding_vec = embedding_vol[slice_idx]
+            sample["embedding"] = torch.from_numpy(
+                np.asarray(embedding_vec).copy()
+            ).float()
+            sample["meta"]["embedding_path"] = embedding_path
+
         if self.transform:
             sample = self.transform(sample)
         return sample
@@ -112,7 +160,7 @@ class BrainTumorDataset(Dataset):
         obj.data_dir = None
         obj.transform = transform
         obj.include_empty_masks = include_empty_masks
-        obj.samples = samples  # list of (image_path or memmap_path, mask_path or memmap_path, slice_idx)
+        obj.samples = samples  # list of tuples or dictionaries describing slice metadata
         obj.resize_shape = resize_shape
         obj._mm_cache = {}
         return obj

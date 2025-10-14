@@ -87,12 +87,19 @@ def main() -> None:
         test_split=data_cfg.get("test_split", 0.1),
         seed=seed,
         include_empty_masks=data_cfg.get("include_empty_masks", False),
+        encoder_config=encoder_cfg,
+        embedding_batch_size=data_cfg.get("embedding_batch_size", 128),
+        embedding_device=data_cfg.get("embedding_device"),
     )
+
+    data_module.setup(stage="fit")
+    if data_module.embedding_dim is None:
+        raise RuntimeError("Failed to prepare embedding memmaps; embedding_dim is undefined.")
 
     replay_capacity = int(algo_cfg.pop("replay_capacity", 200000))
 
     model = TD3Lightning(
-        encoder_cfg=encoder_cfg,
+        embedding_dim=data_module.embedding_dim,
         env_cfg=env_cfg,
         algo_cfg=algo_cfg,
         training_cfg=training_cfg,
