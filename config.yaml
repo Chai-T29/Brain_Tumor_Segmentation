@@ -10,6 +10,7 @@ data:
   val_split: 0.3
   test_split: 0.1
   include_empty_masks: false
+  embedding_device: "mps"
 
 encoder:
   name: "efficientnet_b0"
