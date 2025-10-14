@@ -46,7 +46,7 @@ class TD3Lightning(pl.LightningModule):
         self.algo_config = TD3Config(**algo_cfg)
         self.training_config = TrainingConfig(**training_cfg)
 
-        polygon_dim = self.env_config.num_sides * 3
+        polygon_dim = self.env_config.num_sides * 4
         self.agent = TD3Agent(
             embedding_dim=self.encoder.embedding_dim,
             polygon_dim=polygon_dim,

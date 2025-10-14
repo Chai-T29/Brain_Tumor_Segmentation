@@ -66,9 +66,10 @@ class EfficientNetEncoder(nn.Module):
                 param.requires_grad = False
 
         # Register buffers for ImageNet normalization (mean/std for RGB).
-        if config.pretrained and weights is not None:
-            mean = torch.tensor(weights.meta["mean"]).view(1, 3, 1, 1)
-            std = torch.tensor(weights.meta["std"]).view(1, 3, 1, 1)
+        meta = getattr(weights, "meta", {}) if weights is not None else {}
+        if config.pretrained and "mean" in meta and "std" in meta:
+            mean = torch.tensor(meta["mean"]).view(1, 3, 1, 1)
+            std = torch.tensor(meta["std"]).view(1, 3, 1, 1)
         else:
             mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
             std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)

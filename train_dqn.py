@@ -72,7 +72,7 @@ def main() -> None:
     data_cfg = config.get("data", {})
     encoder_cfg = config.get("encoder", {})
     env_cfg = config.get("environment", {})
-    algo_cfg = config.get("algorithm", {})
+    algo_cfg = dict(config.get("algorithm", {}))
     training_cfg = config.get("training", {})
     logging_cfg = config.get("logging", {})
 
@@ -89,12 +89,14 @@ def main() -> None:
         include_empty_masks=data_cfg.get("include_empty_masks", False),
     )
 
+    replay_capacity = int(algo_cfg.pop("replay_capacity", 200000))
+
     model = TD3Lightning(
         encoder_cfg=encoder_cfg,
         env_cfg=env_cfg,
         algo_cfg=algo_cfg,
         training_cfg=training_cfg,
-        replay_capacity=int(algo_cfg.get("replay_capacity", 200000)),
+        replay_capacity=replay_capacity,
     )
 
     logger = TensorBoardLogger(
