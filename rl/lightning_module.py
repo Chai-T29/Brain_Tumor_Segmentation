@@ -259,7 +259,7 @@ class TD3Lightning(pl.LightningModule):
                 "train/updates": float(performed_updates),
                 "train/transitions": float(transitions_added),
             },
-            on_step=False,
+            on_step=True,
             on_epoch=True,
             prog_bar=True,
             sync_dist=False,
