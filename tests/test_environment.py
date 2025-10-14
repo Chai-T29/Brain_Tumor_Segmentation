@@ -1,139 +1,81 @@
-import pytest
 import torch
 
-from dqn.environment import TumorLocalizationEnv
+from rl.environment import EnvironmentConfig, PolygonLocalizationEnv
 
 
-def _no_tumor_batch(batch_size=1):
-    images = torch.zeros(batch_size, 1, 84, 84)
-    masks = torch.zeros(batch_size, 1, 84, 84)
-    return images, masks
+def _build_env(**overrides):
+    cfg = EnvironmentConfig(
+        num_sides=32,
+        max_steps=5,
+        iou_threshold=0.0,
+        initial_radius=8.0,
+        radial_step_scale=2.0,
+        rotation_step_scale_deg=5.0,
+        length_step_scale=2.0,
+        stop_action_threshold=0.0,
+        reward_success=3.0,
+        reward_no_tumor=2.0,
+        reward_false_stop=-1.0,
+        time_penalty=0.0,
+        hold_penalty=0.0,
+    )
+    for key, value in overrides.items():
+        setattr(cfg, key, value)
+    return PolygonLocalizationEnv(cfg)
 
 
-def test_initial_bbox_covers_resized_frame():
-    resize_shape = (84, 84)
-    env = TumorLocalizationEnv(resize_shape=resize_shape)
-    height, width = 128, 96
-    batch_size = 3
-    images = torch.zeros(batch_size, 1, height, width)
-    masks = torch.zeros(batch_size, 1, height, width)
-
-    (resized_images, bboxes) = env.reset(images, masks)
-
-    expected_xy = torch.zeros(batch_size, 2, dtype=torch.float32)
-    expected_wh = torch.tensor([list(resize_shape[::-1])] * batch_size, dtype=torch.float32)
-
-    assert resized_images.shape[-2:] == resize_shape
-    assert torch.allclose(bboxes[:, :2], expected_xy)
-    assert torch.allclose(bboxes[:, 2:], expected_wh)
+def test_reset_returns_expected_shape():
+    env = _build_env()
+    images = torch.zeros(2, 1, 32, 32)
+    masks = torch.zeros(2, 1, 32, 32)
+    state = env.reset(images, masks)
+    assert state.shape == (2, env.config.num_sides * 3)
 
 
-def test_bbox_scaling_with_non_square_resize():
-    resize_shape = (100, 150)
-    env = TumorLocalizationEnv(resize_shape=resize_shape)
-    height, width = 200, 300
-    images = torch.zeros(1, 1, height, width)
-    masks = torch.zeros(1, 1, height, width)
-
-    (_, bboxes) = env.reset(images, masks)
-
-    expected = torch.tensor([[0.0, 0.0, resize_shape[1], resize_shape[0]]], dtype=torch.float32)
-    assert torch.allclose(bboxes, expected)
-
-
-def test_initial_bbox_overlaps_tumor_mask():
-    env = TumorLocalizationEnv()
-    images = torch.zeros(1, 1, 84, 84)
-    masks = torch.zeros(1, 1, 84, 84)
-    masks[:, :, 10:20, 15:25] = 1.0
-
+def test_stop_action_success_reward():
+    env = _build_env(iou_threshold=0.0, stop_action_threshold=-0.5)
+    images = torch.zeros(1, 1, 32, 32)
+    masks = torch.zeros(1, 1, 32, 32)
+    masks[:, :, 10:22, 10:22] = 1.0
     env.reset(images, masks)
 
-    assert env.last_iou is not None
-    assert env.last_iou.shape == (1,)
-    assert env.last_iou.item() > 0.0
+    actions = torch.zeros(1, env.action_dim)
+    actions[:, -1] = 1.0  # stop immediately
+    _, reward, done, info = env.step(actions)
 
-
-def test_no_tumor_stop_action_reward():
-    env = TumorLocalizationEnv(max_steps=5, iou_threshold=0.5)
-    images, masks = _no_tumor_batch()
-    env.reset(images, masks)
-
-    _, rewards, done, _ = env.step(torch.tensor([env._STOP_ACTION]))
-
-    assert rewards.item() == pytest.approx(env.STOP_REWARD_NO_TUMOR)
-    assert done.item()
-
-
-def test_no_tumor_continue_action_penalty():
-    env = TumorLocalizationEnv(max_steps=5, iou_threshold=0.5)
-    images, masks = _no_tumor_batch()
-    env.reset(images, masks)
-
-    _, rewards, done, _ = env.step(torch.tensor([0]))
-
-    assert rewards.item() == pytest.approx(-env.HOLD_PENALTY, abs=1e-6)
-    assert not done.item()
-
-
-def test_threshold_reached_does_not_force_stop():
-    env = TumorLocalizationEnv(max_steps=5, iou_threshold=0.0, step_size=0.0, scale_factor=1.0)
-    images = torch.zeros(1, 1, 84, 84)
-    masks = torch.zeros(1, 1, 84, 84)
-    masks[:, :, 20:30, 20:30] = 1.0
-
-    env.reset(images, masks)
-
-    _, rewards, done, info = env.step(torch.tensor([0]))
-
-    assert not done.item()
-    assert info["success"].item() is False
-    assert rewards.item() > -1.0  # Should not be clipped due to premature hold penalty
-
-
-def test_hold_penalty_only_after_threshold_persist():
-    env = TumorLocalizationEnv(max_steps=5, iou_threshold=0.0, step_size=0.0, scale_factor=1.0)
-    images = torch.zeros(1, 1, 84, 84)
-    masks = torch.zeros(1, 1, 84, 84)
-    masks[:, :, 10:20, 10:20] = 1.0
-
-    env.reset(images, masks)
-
-    _, first_reward, done, _ = env.step(torch.tensor([0]))
-    assert not done.item()
-
-    _, second_reward, done_flag, _ = env.step(torch.tensor([0]))
-    assert not done_flag.item()
-
-    assert second_reward.item() == pytest.approx(first_reward.item() - 0.5, rel=1e-4, abs=1e-4)
-
-
-def test_stop_action_records_success():
-    env = TumorLocalizationEnv(max_steps=5, iou_threshold=0.0, step_size=0.0, scale_factor=1.0)
-    images = torch.zeros(1, 1, 84, 84)
-    masks = torch.zeros(1, 1, 84, 84)
-    masks[:, :, 5:15, 5:15] = 1.0
-
-    env.reset(images, masks)
-
-    env.step(torch.tensor([0]))  # reach threshold without stopping
-    _, reward, done, info = env.step(torch.tensor([env._STOP_ACTION]))
-
-    assert done.item()
+    assert done.item() is True
     assert info["success"].item() is True
-    expected_reward = env.STOP_REWARD_SUCCESS + 0.5 * info["iou"].item()
-    assert reward.item() == pytest.approx(expected_reward, rel=1e-5, abs=1e-5)
+    assert torch.isclose(reward, torch.tensor(env.config.reward_success)).all()
 
 
-def test_gt_margin_initialisation_allows_movement():
-    env = TumorLocalizationEnv(initial_mode="gt_margin", initial_margin=5.0, step_size=5.0)
-    images = torch.zeros(1, 1, 84, 84)
-    masks = torch.zeros(1, 1, 84, 84)
-    masks[:, :, 30:40, 30:40] = 1.0
+def test_no_tumor_stop_reward_matches_config():
+    env = _build_env(stop_action_threshold=-0.5)
+    images = torch.zeros(1, 1, 32, 32)
+    masks = torch.zeros(1, 1, 32, 32)
+    env.reset(images, masks)
 
-    _, bboxes = env.reset(images, masks)
-    initial_bbox = bboxes.clone()
+    actions = torch.zeros(1, env.action_dim)
+    actions[:, -1] = 1.0
+    _, reward, done, info = env.step(actions)
 
-    (_, updated_bboxes), _, _, _ = env.step(torch.tensor([3]))
+    assert done.item() is True
+    assert info["success"].item() is False
+    assert torch.isclose(reward, torch.tensor(env.config.reward_no_tumor)).all()
 
-    assert updated_bboxes[0, 0] > initial_bbox[0, 0]
+
+def test_actions_keep_vertices_within_bounds():
+    env = _build_env(radial_step_scale=50.0)
+    images = torch.zeros(1, 1, 32, 32)
+    masks = torch.zeros(1, 1, 32, 32)
+    env.reset(images, masks)
+
+    actions = torch.zeros(1, env.action_dim)
+    actions[:, :-1] = 1.0  # push outward aggressively
+    state, _, _, _ = env.step(actions)
+
+    vertices = env.vertices
+    assert vertices[..., 0].min().item() >= 0.0
+    assert vertices[..., 0].max().item() <= 31.0
+    assert vertices[..., 1].min().item() >= 0.0
+    assert vertices[..., 1].max().item() <= 31.0
+    assert state.shape == (1, env.config.num_sides * 3)

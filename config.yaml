@@ -1,3 +1,5 @@
+seed: 42
+
 data:
   data_dir: "MU-Glioma-Post/"
   batch_size: 32
@@ -9,41 +11,56 @@ data:
   test_split: 0.1
   include_empty_masks: false
 
-training:
-  lr: 0.0005
-  gamma: 0.98
-  eps_start: 1.0
-  eps_end: 0.02
-  eps_decay: 300000
-  memory_size: 50000
-  target_update: 5000
-  max_steps: 50
-  grad_clip: 7.0
-  lr_gamma: 0.98
-  seed: 42
-  val_interval: 1
-  max_epochs: 40
-  precision: "32-true"
+encoder:
+  name: "efficientnet_b0"
+  pretrained: true
+  trainable: false
+  embedding_noise_std: 0.01
 
 environment:
+  num_sides: 32
+  max_steps: 60
   iou_threshold: 0.7
-  initial_mode: random_corners
-  step_size: 10.0
-  scale_factor: 1.1
-  min_bbox_size: 10.0
-  initial_margin: 8.0
-  reward_clip_range: [-6.0, 6.0]
-  delta_iou: 2.5
-  current_iou: 0.5
-  stop_reward_success: 4.0
-  stop_reward_no_tumor: 2.0
-  stop_reward_false: 3.0
+  initial_radius: 90.0
+  radial_step_scale: 8.0
+  rotation_step_scale_deg: 12.0
+  length_step_scale: 6.0
+  stop_action_threshold: 0.6
+  reward_success: 4.0
+  reward_no_tumor: 2.0
+  reward_false_stop: -3.0
   time_penalty: 0.02
   hold_penalty: 0.5
 
+algorithm:
+  gamma: 0.99
+  n_step: 3
+  tau: 0.005
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+  policy_delay: 2
+  exploration_noise:
+    sigma_init: 1.0
+    sigma_final: 0.1
+    steps: 500000
+  target_policy_noise_std: 0.2
+  target_policy_noise_clip: 0.5
+  max_grad_norm: 10.0
+  embedding_noise_std: 0.01
+  replay_capacity: 100000
+
+training:
+  max_epochs: 40
+  precision: "32-true"
+  update_batch_size: 256
+  update_every_n_steps: 2
+  collect_steps_per_batch: 50
+  warmup_steps: 1000
+  log_interval: 50
+
 logging:
   log_dir: "lightning_logs"
-  logger_name: "dqn_agent"
+  logger_name: "td3_agent"
   checkpoint_dir: "checkpoints"
   test_gif_limit: 10
   test_gif_dir: "lightning_logs/test_gifs"

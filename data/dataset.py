@@ -96,7 +96,12 @@ class BrainTumorDataset(Dataset):
             image = F.interpolate(image.unsqueeze(0), size=self.resize_shape, mode="bilinear", align_corners=False).squeeze(0)
             mask = F.interpolate(mask.unsqueeze(0), size=self.resize_shape, mode="nearest").squeeze(0)
 
-        sample = {"image": image, "mask": mask}
+        meta = {
+            "image_path": image_path,
+            "mask_path": mask_path,
+            "slice_index": int(slice_idx),
+        }
+        sample = {"image": image, "mask": mask, "meta": meta}
         if self.transform:
             sample = self.transform(sample)
         return sample
