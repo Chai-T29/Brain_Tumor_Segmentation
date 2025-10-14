@@ -134,6 +134,28 @@ class TD3Lightning(pl.LightningModule):
         transitions_added = 0
         max_collect_steps = self.training_config.collect_steps_per_batch or self.env_config.max_steps
 
+        updates_trigger = max(1, self.training_config.update_every_n_steps)
+        performed_updates = 0
+        critic_loss_sum = 0.0
+        actor_loss_sum = 0.0
+        critic_update_count = 0
+        actor_update_count = 0
+
+        def _maybe_run_updates() -> None:
+            nonlocal performed_updates, critic_loss_sum, actor_loss_sum
+            nonlocal critic_update_count, actor_update_count
+            while performed_updates < transitions_added // updates_trigger:
+                if len(self.replay) < self.training_config.update_batch_size:
+                    break
+                batch_samples = self.replay.sample(self.training_config.update_batch_size, device=self.device)
+                metrics = self.agent.update(batch_samples)
+                critic_loss_sum += metrics["critic_loss"]
+                critic_update_count += 1
+                if "actor_loss" in metrics:
+                    actor_loss_sum += metrics["actor_loss"]
+                    actor_update_count += 1
+                performed_updates += 1
+
         for _ in range(max_collect_steps):
             if not alive_mask.any():
                 break
@@ -188,6 +210,7 @@ class TD3Lightning(pl.LightningModule):
                     )
                     self.replay.add(transition)
                     transitions_added += 1
+                    _maybe_run_updates()
 
             polygon_state_cpu = next_polygon_cpu
             polygon_state = polygon_state_cpu.to(self.device)
@@ -209,29 +232,20 @@ class TD3Lightning(pl.LightningModule):
                 )
                 self.replay.add(transition)
                 transitions_added += 1
+                _maybe_run_updates()
 
         if self.environment.last_iou is not None:
             last_iou = self.environment.last_iou.to(self.device)
             final_iou = torch.where(alive_mask.to(self.device), last_iou, final_iou)
 
-        updates_trigger = max(1, self.training_config.update_every_n_steps)
-        updates_to_run = transitions_added // updates_trigger
+        _maybe_run_updates()
 
-        critic_losses = []
-        actor_losses = []
-        performed_updates = 0
-        for _ in range(updates_to_run):
-            if len(self.replay) < self.training_config.update_batch_size:
-                break
-            batch_samples = self.replay.sample(self.training_config.update_batch_size, device=self.device)
-            metrics = self.agent.update(batch_samples)
-            critic_losses.append(metrics["critic_loss"])
-            if "actor_loss" in metrics:
-                actor_losses.append(metrics["actor_loss"])
-            performed_updates += 1
-
-        mean_critic_loss = float(sum(critic_losses) / len(critic_losses)) if critic_losses else 0.0
-        mean_actor_loss = float(sum(actor_losses) / len(actor_losses)) if actor_losses else 0.0
+        mean_critic_loss = (
+            float(critic_loss_sum / critic_update_count) if critic_update_count > 0 else 0.0
+        )
+        mean_actor_loss = (
+            float(actor_loss_sum / actor_update_count) if actor_update_count > 0 else 0.0
+        )
 
         self.log_dict(
             {

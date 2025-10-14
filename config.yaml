@@ -50,7 +50,7 @@ algorithm:
   embedding_noise_std: 0.01
   actor_hidden_sizes: [512, 256]
   critic_hidden_sizes: [512, 256]
-  replay_capacity: 100000
+  replay_capacity: 300000
 
 training:
   max_epochs: 40
