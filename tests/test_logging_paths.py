@@ -2,14 +2,14 @@ from pathlib import Path
 
 from pytorch_lightning.loggers import TensorBoardLogger
 
-from test_dqn import find_best_checkpoint
+from test_dqn import find_checkpoint
 
 
 def test_tensorboard_logger_respects_explicit_version(tmp_path):
     """Specifying a logger version should influence both logging and checkpoint paths."""
 
     log_dir = tmp_path / "lightning_logs"
-    logger_name = "dqn_agent"
+    logger_name = "td3_agent"
     version = 7
     checkpoint_subdir = "checkpoints"
 
@@ -27,11 +27,6 @@ def test_tensorboard_logger_respects_explicit_version(tmp_path):
     checkpoint_path = checkpoint_dir / "dummy.ckpt"
     checkpoint_path.write_text("checkpoint content", encoding="utf-8")
 
-    found_checkpoint = find_best_checkpoint(
-        log_dir=log_dir,
-        logger_name=logger_name,
-        checkpoint_subdir=checkpoint_subdir,
-        versions=[expected_log_dir],
-    )
+    found_checkpoint = find_checkpoint(log_dir=log_dir, logger_name=logger_name, checkpoint_subdir=checkpoint_subdir)
 
     assert found_checkpoint == checkpoint_path

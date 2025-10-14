@@ -20,6 +20,7 @@ except Exception:  # minimal fallback if tqdm is unavailable
 class NormalizeSlice:
     def __call__(self, sample):
         image, mask = sample["image"], sample["mask"]  # [1,H,W]
+        meta = sample.get("meta")
         nz = (image != 0)
         if nz.any():
             mean = image[nz].mean()
@@ -29,7 +30,10 @@ class NormalizeSlice:
             std = image.std().clamp(min=1e-6)
         image = (image - mean) / std
         image = image.clamp_(-6, 6)
-        return {"image": image, "mask": mask}
+        result = {"image": image, "mask": mask}
+        if meta is not None:
+            result["meta"] = meta
+        return result
 
 
 class BrainTumorDataModule(pl.LightningDataModule):
