@@ -9,6 +9,7 @@ This project reframes 2D brain tumor localization as a continuous-control reinfo
 - **TD3 with n-step Targets:** Actor and twin critics share the EfficientNet embeddings and polygon state. Targets incorporate configurable n-step returns, Polyak averaging, target policy smoothing, and delayed policy updates.
 - **Flexible Data Pipeline:** A Lightning `DataModule` performs one-time memmap caching of slices, optional inclusion of tumor-free samples, and returns per-sample metadata so raw images can be fetched on demand for visualization.
 - **Config-Driven Training:** All tunable hyperparameters (encoder, environment geometry, RL algorithm, replay buffer, update cadence, logging) live in `config.yaml`, keeping experiments reproducible.
+- **Validation & GIF-producing Test Loops:** Deterministic validation/test rollouts reuse the same simulator, and the test loop records configurable GIFs that overlay the polygon trajectory on MRI slices for qualitative analysis.
 
 ## Project Layout
 
@@ -70,7 +71,7 @@ Evaluate the latest checkpoint on the test split:
 python test_dqn.py
 ```
 
-The script loads the most recent checkpoint, rolls out deterministic policies (no exploration or embedding noise), and reports success rate, mean IoU, and average steps per slice.
+The script loads the most recent checkpoint, rolls out deterministic policies (no exploration or embedding noise), reports success rate, mean IoU, and average steps per slice, and stores GIFs (up to `logging.test_gif_limit`) in the configured directory.
 
 ## Configuration Highlights
 
@@ -78,10 +79,17 @@ The script loads the most recent checkpoint, rolls out deterministic policies (n
 - **n-step targets:** `algorithm.n_step` (default 3) matches the replay accumulator. Discounting uses `gamma ** n` for non-terminal transitions.
 - **Embedding noise:** Both the encoder (`encoder.embedding_noise_std`) and agent (`algorithm.embedding_noise_std`) can inject Gaussian noise, enabling DrQ-style regularisation without image augmentations.
 - **Training cadence:** `training.collect_steps_per_batch` limits how many environment steps are gathered per loader batch, while `update_every_n_steps` and `update_batch_size` govern the number of critic updates run afterwards.
+- **Optimiser control:** Separate learning rates (`algorithm.actor_lr`, `algorithm.critic_lr`) and network widths (`algorithm.actor_hidden_sizes`, `algorithm.critic_hidden_sizes`) are exposed, so policy and critic capacity can be tuned alongside their optimisers.
+
+## Authors
+
+1. Chaitanya Tatipigari
+2. Suraj Godithi
 
 ## References
 
-1. Yarats, D., Kostrikov, I., & Fergus, R. “Image Augmentation Is All You Need: Regularizing Deep Reinforcement Learning from Pixels.” *ICLR*, 2021. (DrQ / DrQ-v2)
-2. Fujimoto, S., van Hoof, H., & Meger, D. “Addressing Function Approximation Error in Actor-Critic Methods.” *ICML*, 2018. (TD3)
-3. Tan, M. & Le, Q. V. “EfficientNet: Rethinking Model Scaling for Convolutional Neural Networks.” *ICML*, 2019.
-4. Tatipigari, C. & collaborators. “MU-Glioma-Post Operative Glioma Dataset.” The Cancer Imaging Archive (TCIA).
+## References
+1. Yarats, Denis, et al. "Mastering visual continuous control: Improved data-augmented reinforcement learning." arXiv preprint arXiv:2107.09645 (2021).
+2. Fujimoto, Scott, Herke Hoof, and David Meger. "Addressing function approximation error in actor-critic methods." International conference on machine learning. PMLR, 2018.
+3. Tan, Mingxing, and Quoc Le. "Efficientnet: Rethinking model scaling for convolutional neural networks." International conference on machine learning. PMLR, 2019.
+4. Yaseen, D., Garrett, F., Gass, J., Greaser, J., Isufi, E., Layfield, L. J., Nada, A., Porgorzelski, K., Sinclair, J., Tahon, N. H. M., & Thacker, J. (2025). University of Missouri Post-operative Glioma Dataset (MU-Glioma-Post) (Version 1) [Data set]. The Cancer Imaging Archive. https://doi.org/10.7937/7K9K-3C83

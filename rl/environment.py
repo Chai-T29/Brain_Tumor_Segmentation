@@ -6,6 +6,11 @@ from typing import Dict, Tuple
 
 import numpy as np
 import torch
+import matplotlib
+
+matplotlib.use("Agg", force=True)
+from matplotlib import pyplot as plt
+from matplotlib import patches
 from matplotlib.path import Path
 
 
@@ -257,3 +262,40 @@ class PolygonLocalizationEnv:
         union = poly_masks_t.sum(dim=(1, 2)) + gt_masks.sum(dim=(1, 2)) - intersection
         iou = torch.where(union > 0, intersection / union, torch.zeros_like(union))
         return iou
+
+    def render(self, index: int = 0, mode: str = "rgb_array"):
+        if self.images is None or self.vertices is None:
+            raise RuntimeError("Environment must be reset before rendering.")
+        if not 0 <= index < self.images.size(0):
+            raise IndexError("Render index out of range.")
+
+        image = self.images[index].detach().cpu().squeeze(0)
+        img_np = image.numpy()
+        img_min, img_max = float(img_np.min()), float(img_np.max())
+        if img_max > img_min:
+            img_np = (img_np - img_min) / (img_max - img_min)
+        else:
+            img_np = np.zeros_like(img_np)
+
+        vertices = self.vertices[index].detach().cpu().numpy()
+
+        fig, ax = plt.subplots(figsize=(4, 4))
+        ax.imshow(img_np, cmap="gray")
+        if self.masks is not None:
+            mask = self.masks[index].detach().cpu().squeeze(0).numpy()
+            ax.imshow(mask, cmap="Reds", alpha=0.25)
+
+        polygon = patches.Polygon(vertices, closed=True, fill=False, edgecolor="cyan", linewidth=2.0)
+        ax.add_patch(polygon)
+        ax.axis("off")
+        fig.tight_layout(pad=0)
+
+        if mode == "human":
+            plt.show()
+            plt.close(fig)
+            return None
+
+        fig.canvas.draw()
+        frame = np.asarray(fig.canvas.buffer_rgba())
+        plt.close(fig)
+        return frame

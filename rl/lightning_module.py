@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, Optional
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import Dict, Optional, Tuple, List
 
+import numpy as np
 import pytorch_lightning as pl
 import torch
+import imageio.v2 as imageio
 
 from .agent import TD3Agent, TD3Config, NoiseScheduleConfig
 from .encoder import build_encoder, EncoderConfig, EfficientNetEncoder
@@ -32,6 +35,7 @@ class TD3Lightning(pl.LightningModule):
         algo_cfg: Dict,
         training_cfg: Dict,
         replay_capacity: int,
+        logging_cfg: Optional[Dict] = None,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -39,6 +43,9 @@ class TD3Lightning(pl.LightningModule):
         self.encoder, self.encoder_config = build_encoder(encoder_cfg)
         self.env_config = EnvironmentConfig(**env_cfg)
         self.environment = PolygonLocalizationEnv(self.env_config)
+        env_config_copy = EnvironmentConfig(**asdict(self.env_config))
+        self.val_env = PolygonLocalizationEnv(env_config_copy)
+        self.test_env = PolygonLocalizationEnv(EnvironmentConfig(**asdict(self.env_config)))
 
         algo_cfg = dict(algo_cfg)
         if "exploration_noise" in algo_cfg and isinstance(algo_cfg["exploration_noise"], dict):
@@ -49,6 +56,12 @@ class TD3Lightning(pl.LightningModule):
             algo_cfg["critic_hidden_sizes"] = tuple(algo_cfg["critic_hidden_sizes"])
         self.algo_config = TD3Config(**algo_cfg)
         self.training_config = TrainingConfig(**training_cfg)
+        self.logging_cfg = logging_cfg or {}
+        self.test_gif_limit = int(self.logging_cfg.get("test_gif_limit", 10))
+        self.test_gif_fps = int(self.logging_cfg.get("test_gif_fps", 4))
+        gif_dir = self.logging_cfg.get("test_gif_dir", "lightning_logs/test_gifs")
+        self._gif_output_dir = Path(gif_dir)
+        self._test_episode_index = 0
 
         polygon_dim = self.env_config.num_sides * 4
         self.agent = TD3Agent(
@@ -70,6 +83,14 @@ class TD3Lightning(pl.LightningModule):
         self.automatic_optimization = False
 
     def on_fit_start(self) -> None:
+        self.agent.to(self.device)
+        self.encoder.to(self.device)
+
+    def on_validation_start(self) -> None:
+        self.agent.to(self.device)
+        self.encoder.to(self.device)
+
+    def on_test_start(self) -> None:
         self.agent.to(self.device)
         self.encoder.to(self.device)
 
@@ -223,3 +244,119 @@ class TD3Lightning(pl.LightningModule):
         )
 
         return torch.tensor(mean_critic_loss, device=self.device)
+
+    def validation_step(self, batch, batch_idx: int):
+        metrics, _ = self._simulate_environment(self.val_env, batch, deterministic=True, record=False)
+        self._log_metrics(metrics, prefix="val")
+        return metrics
+
+    def on_test_epoch_start(self) -> None:
+        self._gif_output_dir.mkdir(parents=True, exist_ok=True)
+        self._test_episode_index = 0
+
+    def test_step(self, batch, batch_idx: int):
+        record = self._test_episode_index < self.test_gif_limit
+        metrics, frames = self._simulate_environment(self.test_env, batch, deterministic=True, record=record)
+        self._log_metrics(metrics, prefix="test")
+
+        if record and frames:
+            reward_value = metrics["avg_reward"].detach().cpu().item()
+            gif_name = f"episode_{self._test_episode_index:03d}_reward_{reward_value:.2f}.gif"
+            imageio.mimsave(self._gif_output_dir / gif_name, frames, fps=self.test_gif_fps)
+            self._test_episode_index += 1
+
+        return metrics
+
+    def test_epoch_end(self, outputs: List[Dict[str, torch.Tensor]]):
+        if not outputs:
+            return
+        avg_reward = torch.stack([o["avg_reward"].detach().to(self.device) for o in outputs]).mean()
+        mean_iou = torch.stack([o["mean_iou"].detach().to(self.device) for o in outputs]).mean()
+        self.log("test/avg_reward_epoch", avg_reward, prog_bar=True)
+        self.log("test/mean_iou_epoch", mean_iou, prog_bar=False)
+
+    def _simulate_environment(
+        self,
+        env: PolygonLocalizationEnv,
+        batch: Dict[str, torch.Tensor],
+        deterministic: bool,
+        record: bool,
+    ) -> Tuple[Dict[str, torch.Tensor], Optional[List[np.ndarray]]]:
+        images = batch["image"].to(self.device, non_blocking=True)
+        masks = batch["mask"].to(self.device, non_blocking=True)
+
+        with torch.no_grad():
+            embeddings = self.encoder.embed_without_noise(images)
+
+        state_cpu = env.reset(images.cpu(), masks.cpu())
+        state = state_cpu.to(self.device)
+
+        batch_size = images.size(0)
+        cumulative_rewards = torch.zeros(batch_size, device=self.device)
+        steps_taken = torch.zeros(batch_size, device=self.device)
+        success_flags = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
+        iou_values: List[torch.Tensor] = []
+        active_mask = torch.ones(batch_size, dtype=torch.bool, device=self.device)
+        frames: List[np.ndarray] = []
+
+        if record:
+            frame = env.render(index=0, mode="rgb_array")
+            if frame is not None:
+                frames.append(frame)
+
+        max_steps = self.env_config.max_steps
+        for _ in range(max_steps):
+            if not active_mask.any():
+                break
+
+            actions = torch.zeros(batch_size, env.action_dim, device=self.device)
+            active_indices = active_mask.nonzero(as_tuple=False).squeeze(1)
+            selected_actions = self.agent.act(
+                embeddings[active_indices],
+                state[active_indices],
+                deterministic=deterministic,
+                apply_embedding_noise=False,
+            )
+            actions[active_indices] = selected_actions
+
+            next_state_cpu, rewards_cpu, done_cpu, info = env.step(actions.detach().cpu())
+
+            rewards = rewards_cpu.to(self.device)
+            done_bool = done_cpu.to(torch.bool).to(self.device)
+            success = info["success"].to(torch.bool).to(self.device)
+            iou = info["iou"].to(self.device)
+
+            cumulative_rewards += rewards
+            steps_taken += active_mask.float()
+            success_flags = success_flags | success
+            iou_values.append(iou)
+
+            state = next_state_cpu.to(self.device)
+            active_mask = active_mask & (~done_bool)
+
+            if record:
+                frame = env.render(index=0, mode="rgb_array")
+                if frame is not None:
+                    frames.append(frame)
+
+        mean_iou = torch.cat(iou_values).mean() if iou_values else torch.tensor(0.0, device=self.device)
+        metrics = {
+            "avg_reward": cumulative_rewards.mean(),
+            "episode_length": steps_taken.mean(),
+            "mean_iou": mean_iou,
+            "success_rate": success_flags.float().mean(),
+        }
+        return metrics, (frames if record else None)
+
+    def _log_metrics(self, metrics: Dict[str, torch.Tensor], prefix: str) -> None:
+        for key, value in metrics.items():
+            if not isinstance(value, torch.Tensor):
+                value = torch.tensor(value, device=self.device)
+            self.log(
+                f"{prefix}/{key}",
+                value.detach(),
+                on_epoch=True,
+                prog_bar=(key == "avg_reward"),
+                sync_dist=False,
+                add_dataloader_idx=False,
+            )

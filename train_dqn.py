@@ -97,6 +97,7 @@ def main() -> None:
         algo_cfg=algo_cfg,
         training_cfg=training_cfg,
         replay_capacity=replay_capacity,
+        logging_cfg=logging_cfg,
     )
 
     logger = TensorBoardLogger(
