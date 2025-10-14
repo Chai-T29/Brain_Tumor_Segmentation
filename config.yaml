@@ -2,11 +2,11 @@ seed: 42
 
 data:
   data_dir: "MU-Glioma-Post/"
-  batch_size: 2048
+  batch_size: 128
   num_workers: 8
   persistent_workers: true
   pin_memory: false
-  prefetch_factor: 3
+  prefetch_factor: 4
   val_split: 0.3
   test_split: 0.1
   include_empty_masks: false
@@ -36,8 +36,8 @@ algorithm:
   gamma: 0.99
   n_step: 3
   tau: 0.005
-  actor_lr: 0.0003
-  critic_lr: 0.0003
+  actor_lr: 0.0001
+  critic_lr: 0.0001
   policy_delay: 2
   exploration_noise:
     sigma_init: 1.0
@@ -47,15 +47,15 @@ algorithm:
   target_policy_noise_clip: 0.5
   max_grad_norm: 10.0
   embedding_noise_std: 0.01
-  actor_hidden_sizes: [256, 128]
-  critic_hidden_sizes: [256, 128]
+  actor_hidden_sizes: [512, 256]
+  critic_hidden_sizes: [512, 256]
   replay_capacity: 100000
 
 training:
   max_epochs: 40
   precision: "32-true"
   update_batch_size: 256
-  update_every_n_steps: 2
+  update_every_n_steps: 4
   collect_steps_per_batch: 50
   warmup_steps: 1000
   log_interval: 50
