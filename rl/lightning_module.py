@@ -63,6 +63,7 @@ class TD3Lightning(pl.LightningModule):
         gif_dir = self.logging_cfg.get("test_gif_dir", "lightning_logs/test_gifs")
         self._gif_output_dir = Path(gif_dir)
         self._test_episode_index = 0
+        self._test_epoch_outputs: List[Dict[str, torch.Tensor]] = []
 
         polygon_dim = self.env_config.num_sides * 4
         self.agent = TD3Agent(
@@ -132,6 +133,7 @@ class TD3Lightning(pl.LightningModule):
         success_flags = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
 
         transitions_added = 0
+        batch_steps_completed = 0
         max_collect_steps = self.training_config.collect_steps_per_batch or self.env_config.max_steps
 
         updates_trigger = max(1, self.training_config.update_every_n_steps)
@@ -144,7 +146,7 @@ class TD3Lightning(pl.LightningModule):
         def _maybe_run_updates() -> None:
             nonlocal performed_updates, critic_loss_sum, actor_loss_sum
             nonlocal critic_update_count, actor_update_count
-            while performed_updates < transitions_added // updates_trigger:
+            while performed_updates < batch_steps_completed // updates_trigger:
                 if len(self.replay) < self.training_config.update_batch_size:
                     break
                 batch_samples = self.replay.sample(self.training_config.update_batch_size, device=self.device)
@@ -160,6 +162,7 @@ class TD3Lightning(pl.LightningModule):
             if not alive_mask.any():
                 break
 
+            batch_steps_completed += 1
             active_indices = alive_mask.nonzero(as_tuple=False).squeeze(1)
             prev_polygon_cpu = polygon_state_cpu.clone()
 
@@ -210,7 +213,6 @@ class TD3Lightning(pl.LightningModule):
                     )
                     self.replay.add(transition)
                     transitions_added += 1
-                    _maybe_run_updates()
 
             polygon_state_cpu = next_polygon_cpu
             polygon_state = polygon_state_cpu.to(self.device)
@@ -218,6 +220,9 @@ class TD3Lightning(pl.LightningModule):
             alive_mask = alive_before & (~done_bool)
             self._global_step_interactions += int(active_indices.numel())
 
+            _maybe_run_updates()
+
+        leftover_transitions_added = 0
         for env_idx in range(batch_size):
             leftovers = accumulator.flush(env_idx)
             for embedding_t, polygon_t, action_t, reward_t, next_polygon_t, done_flag_t, discount_t in leftovers:
@@ -232,7 +237,10 @@ class TD3Lightning(pl.LightningModule):
                 )
                 self.replay.add(transition)
                 transitions_added += 1
-                _maybe_run_updates()
+                leftover_transitions_added += 1
+
+        if leftover_transitions_added > 0:
+            _maybe_run_updates()
 
         if self.environment.last_iou is not None:
             last_iou = self.environment.last_iou.to(self.device)
@@ -275,11 +283,13 @@ class TD3Lightning(pl.LightningModule):
     def on_test_epoch_start(self) -> None:
         self._gif_output_dir.mkdir(parents=True, exist_ok=True)
         self._test_episode_index = 0
+        self._test_epoch_outputs = []
 
     def test_step(self, batch, batch_idx: int):
         record = self._test_episode_index < self.test_gif_limit
         metrics, frames = self._simulate_environment(self.test_env, batch, deterministic=True, record=record)
         self._log_metrics(metrics, prefix="test")
+        self._test_epoch_outputs.append(metrics)
 
         if record and frames:
             reward_value = metrics["avg_reward"].detach().cpu().item()
@@ -298,11 +308,12 @@ class TD3Lightning(pl.LightningModule):
 
         return metrics
 
-    def test_epoch_end(self, outputs: List[Dict[str, torch.Tensor]]):
-        if not outputs:
+    def on_test_epoch_end(self) -> None:
+        if not self._test_epoch_outputs:
             return
-        avg_reward = torch.stack([o["avg_reward"].detach().to(self.device) for o in outputs]).mean()
-        mean_iou = torch.stack([o["mean_iou"].detach().to(self.device) for o in outputs]).mean()
+        device = self.device
+        avg_reward = torch.stack([o["avg_reward"].detach().to(device) for o in self._test_epoch_outputs]).mean()
+        mean_iou = torch.stack([o["mean_iou"].detach().to(device) for o in self._test_epoch_outputs]).mean()
         self.log("test/avg_reward_epoch", avg_reward, prog_bar=True)
         self.log("test/mean_iou_epoch", mean_iou, prog_bar=False)
 
@@ -381,14 +392,30 @@ class TD3Lightning(pl.LightningModule):
         for key, value in metrics.items():
             if not isinstance(value, torch.Tensor):
                 value = torch.tensor(value, device=self.device)
+            # NaN guard
+            if torch.isnan(value).any():
+                value = torch.nan_to_num(value, nan=0.0)
+            if (prefix == "val") and (key == "mean_iou"):
+                self.log(
+                    "val_mean_iou",
+                    value.detach(),
+                    on_step=False,
+                    on_epoch=True,
+                    prog_bar=False,
+                    sync_dist=True,
+                    add_dataloader_idx=False,
+                )
+                continue
             self.log(
                 f"{prefix}/{key}",
                 value.detach(),
+                on_step=False,
                 on_epoch=True,
                 prog_bar=(key == "avg_reward"),
-                sync_dist=False,
+                sync_dist=True,
                 add_dataloader_idx=False,
             )
+
 
     @staticmethod
     def _resolve_meta_value(meta_batch: Optional[Dict[str, Any]], key: str) -> Optional[Any]:

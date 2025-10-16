@@ -3,11 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Optional
 
-import torch
+import pytorch_lightning as pl
 import yaml
+import re
 
 from data.data_module import BrainTumorDataModule
-from rl.environment import PolygonLocalizationEnv, EnvironmentConfig
 from rl.lightning_module import TD3Lightning
 
 
@@ -15,11 +15,23 @@ def load_config(path: str) -> Dict:
     with open(path, "r", encoding="utf-8") as handle:
         return yaml.safe_load(handle)
 
+def _extract_val_miou(path: Path) -> float:
+    name = path.name
+    m = re.search(r"val_miou([0-9.]+)", name)  # PL ModelCheckpoint filenames
+    if not m:
+        m = re.search(r"val_mean_iou([0-9.]+)", name)  # SimpleMetricCheckpoint fallback
+    if not m:
+        m = re.search(r"miou([0-9.]+)", name)  # last resort
+    return float(m.group(1)[:-1]) if m else float("-inf")
 
 def _sorted_checkpoint_paths(directory: Path) -> list[Path]:
     if not directory.exists():
         return []
-    checkpoints = sorted(directory.glob("*.ckpt"), key=lambda p: p.stat().st_mtime, reverse=True)
+    checkpoints = list(directory.glob("*.ckpt"))
+    checkpoints.sort(
+        key=lambda p: (_extract_val_miou(p), p.stat().st_mtime),
+        reverse=True,
+    )
     return checkpoints
 
 
@@ -41,82 +53,18 @@ def find_checkpoint(log_dir: Path, logger_name: str, checkpoint_subdir: str) -> 
     return None
 
 
-def evaluate(model: TD3Lightning, datamodule: BrainTumorDataModule, device: torch.device) -> Dict[str, float]:
-    datamodule.setup("test")
-    test_loader = datamodule.test_dataloader()
-
-    env = PolygonLocalizationEnv(EnvironmentConfig(**model.hparams["env_cfg"]))
-    agent = model.agent.to(device)
-
-    total_success = 0.0
-    total_iou = 0.0
-    total_steps = 0.0
-    total_samples = 0
-
-    for batch in test_loader:
-        images = batch["image"].to(device)
-        masks = batch["mask"].to(device)
-        embeddings = batch["embedding"].to(device)
-
-        polygon_state_cpu = env.reset(images.cpu(), masks.cpu())
-        polygon_state = polygon_state_cpu.to(device)
-        alive = torch.ones(images.size(0), dtype=torch.bool)
-        final_iou = torch.zeros(images.size(0), device=device)
-        success_flags = torch.zeros(images.size(0), dtype=torch.bool, device=device)
-        steps_taken = torch.zeros(images.size(0), device=device)
-
-        for _ in range(env.config.max_steps):
-            if not alive.any():
-                break
-            active_idx = alive.nonzero(as_tuple=False).squeeze(1)
-            actions = torch.zeros(images.size(0), env.action_dim, device=device)
-            deterministic_actions = agent.act(
-                embeddings[active_idx],
-                polygon_state[active_idx],
-                deterministic=True,
-                apply_embedding_noise=False,
-            )
-            actions[active_idx] = deterministic_actions
-
-            next_polygon_cpu, _, done_cpu, info = env.step(actions.cpu())
-            polygon_state = next_polygon_cpu.to(device)
-
-            steps_taken[active_idx] += 1.0
-            success_flags = success_flags | info["success"].to(device=device)
-            newly_done = done_cpu & alive
-            if newly_done.any():
-                final_iou = torch.where(newly_done.to(device), info["iou"].to(device), final_iou)
-            alive = alive & (~done_cpu)
-
-        if env.last_iou is not None:
-            final_iou = torch.where(alive.to(device), env.last_iou.to(device), final_iou)
-
-        total_success += success_flags.float().sum().item()
-        total_iou += final_iou.sum().item()
-        total_steps += steps_taken.sum().item()
-        total_samples += images.size(0)
-
-    if total_samples == 0:
-        return {"success_rate": 0.0, "mean_iou": 0.0, "avg_steps": 0.0}
-
-    return {
-        "success_rate": total_success / total_samples,
-        "mean_iou": total_iou / total_samples,
-        "avg_steps": total_steps / total_samples,
-    }
-
-
 def main() -> None:
     config = load_config("config.yaml")
     data_cfg = config.get("data", {})
+    training_cfg = config.get("training", {})
     logging_cfg = config.get("logging", {})
 
     datamodule = BrainTumorDataModule(
         data_dir=data_cfg.get("data_dir", "MU-Glioma-Post/"),
         batch_size=data_cfg.get("batch_size", 16),
         num_workers=data_cfg.get("num_workers", 0),
-        persistent_workers=False,
-        pin_memory=False,
+        persistent_workers=data_cfg.get("persistent_workers", False),
+        pin_memory=data_cfg.get("pin_memory", False),
         prefetch_factor=data_cfg.get("prefetch_factor", 2),
         val_split=data_cfg.get("val_split", 0.1),
         test_split=data_cfg.get("test_split", 0.1),
@@ -143,12 +91,26 @@ def main() -> None:
 
     print(f"Loading checkpoint: {checkpoint_path}")
     model = TD3Lightning.load_from_checkpoint(str(checkpoint_path))
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    metrics = evaluate(model, datamodule, device)
+    datamodule.setup(stage="test")
+
+    trainer = pl.Trainer(
+        logger=False,
+        enable_checkpointing=False,
+        precision=training_cfg.get("precision", "32-true"),
+        accelerator="auto",
+        devices="auto",
+        enable_model_summary=False,
+    )
+
+    test_results = trainer.test(model=model, datamodule=datamodule, verbose=False)
+
+    if not test_results:
+        print("No test results returned.")
+        return
 
     print("Evaluation metrics:")
-    for key, value in metrics.items():
-        print(f"  {key}: {value:.4f}")
+    for metric, value in sorted(test_results[0].items()):
+        print(f"  {metric}: {value:.4f}")
 
 
 if __name__ == "__main__":

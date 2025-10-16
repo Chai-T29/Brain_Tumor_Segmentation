@@ -95,7 +95,7 @@ class BrainTumorDataModule(pl.LightningDataModule):
     # ------------------------------------------------------------------ #
 
     def _prepare_cache(self) -> None:
-        if self._cache_prepared:
+        if self._cache_prepared and self._groups:
             return
 
         if not self.encoder_config_dict:
@@ -258,17 +258,117 @@ class BrainTumorDataModule(pl.LightningDataModule):
 
     # ------------------------------------------------------------------ #
 
+    def _load_cache_metadata(self) -> None:
+        """Lightweight metadata loader for validate/test stages.
+
+        Assumes decompressed slices and embeddings were already created during training.
+        Builds self._groups from files on disk without running the encoder.
+        """
+        if self._cache_prepared and self._groups:
+            return
+
+        cache_dir = os.path.join(self.data_dir, "decompressed")
+        emb_root = os.path.join(self.data_dir, "embeddings")
+
+        if not os.path.isdir(cache_dir) or not os.path.isdir(emb_root):
+            raise RuntimeError(
+                "Cached memmaps/embeddings not found. Please run a 'fit' stage first to prepare the cache."
+            )
+
+        # Index available embeddings by key -> path, and infer embedding_dim/model_name
+        emb_dirs = [
+            d for d in os.listdir(emb_root)
+            if os.path.isdir(os.path.join(emb_root, d))
+        ]
+        emb_index = {}
+        embedding_dim = None
+        embedding_model_name = None
+        for d in emb_dirs:
+            dpath = os.path.join(emb_root, d)
+            for fname in os.listdir(dpath):
+                if not fname.endswith("_embeddings.npy"):
+                    continue
+                key = fname[: -len("_embeddings.npy")]
+                path = os.path.join(dpath, fname)
+                # first occurrence wins
+                emb_index.setdefault(key, path)
+                if embedding_dim is None:
+                    arr = np.load(path, mmap_mode="r")
+                    embedding_dim = int(arr.shape[1])
+                    del arr
+                    embedding_model_name = d
+
+        # Build groups from decompressed masks/images and the embedding index
+        groups: List[Dict[str, any]] = []
+        for fname in os.listdir(cache_dir):
+            if not fname.endswith("_mask_224.npy"):
+                continue
+            key = fname[: -len("_mask_224.npy")]
+            img_mm_path = os.path.join(cache_dir, f"{key}_image_224.npy")
+            msk_mm_path = os.path.join(cache_dir, fname)
+            if not (os.path.exists(img_mm_path) and os.path.exists(msk_mm_path)):
+                continue
+
+            # compute slice_indices quickly from mask memmap
+            mask_mm = np.load(msk_mm_path, mmap_mode="r")
+            slice_indices = []
+            for i in range(mask_mm.shape[2]):
+                has_tumor = float(mask_mm[:, :, i].sum()) > 0.0
+                if has_tumor or self.include_empty_masks:
+                    slice_indices.append(i)
+            if not slice_indices:
+                continue
+
+            emb_path = emb_index.get(key)
+            if emb_path is None:
+                # embeddings missing for this case -> skip in eval-only mode
+                continue
+
+            # Extract patient/timepoint if key follows "patient__timepoint" convention
+            parts = key.split("__")
+            patient_id = parts[0] if len(parts) >= 1 else "unknown"
+            timepoint_id = parts[1] if len(parts) >= 2 else "unknown"
+
+            groups.append(
+                {
+                    "image_mm": img_mm_path,
+                    "mask_mm": msk_mm_path,
+                    "slice_indices": slice_indices,
+                    "key": key,
+                    "patient_id": patient_id,
+                    "timepoint_id": timepoint_id,
+                    "source_image": "",
+                    "source_mask": "",
+                    "embedding_mm": emb_path,
+                }
+            )
+
+        if not groups:
+            raise RuntimeError(
+                "No cached groups with embeddings were found. Run training once to generate the cache."
+            )
+
+        # Populate module state
+        self.embedding_dim = embedding_dim
+        self.embedding_model_name = embedding_model_name
+        self._groups = groups
+        self._cache_prepared = True
+
     def setup(self, stage: Optional[str] = None) -> None:
         if stage not in (None, "fit", "validate", "test"):
             return
 
-        self._prepare_cache()
+        if stage in (None, "fit"):
+            self._prepare_cache()
+        else:
+            if not self._cache_prepared or not self._groups:
+                self._load_cache_metadata()
 
-        if self.train_dataset is not None and stage in (None, "fit"):
-            return
-        if self.val_dataset is not None and stage in ("validate",):
-            return
-        if self.test_dataset is not None and stage in ("test",):
+        need_train = self.train_dataset is None and stage in (None, "fit")
+        need_val = self.val_dataset is None and stage in (None, "fit", "validate")
+        need_test = self.test_dataset is None and stage in (None, "fit", "validate", "test")
+
+        if not any([need_train, need_val, need_test]):
             return
 
         rng = random.Random(self.seed)
@@ -312,14 +412,14 @@ class BrainTumorDataModule(pl.LightningDataModule):
         test_samples = expand(test_groups)
 
         dataset_kwargs = dict(transform=self.transform, resize_shape=None)
-        self.train_dataset = BrainTumorDataset.from_samples(train_samples, **dataset_kwargs)
-        self.val_dataset = BrainTumorDataset.from_samples(val_samples, **dataset_kwargs)
-        self.test_dataset = BrainTumorDataset.from_samples(test_samples, **dataset_kwargs)
-
-        if not val_samples:
-            self.val_dataset = self.train_dataset
-        if not test_samples:
-            self.test_dataset = self.val_dataset
+        if need_train:
+            self.train_dataset = BrainTumorDataset.from_samples(train_samples, **dataset_kwargs)
+        if need_val:
+            val_ds = BrainTumorDataset.from_samples(val_samples or train_samples, **dataset_kwargs)
+            self.val_dataset = val_ds
+        if need_test:
+            ref_samples = test_samples or val_samples or train_samples
+            self.test_dataset = BrainTumorDataset.from_samples(ref_samples, **dataset_kwargs)
 
     def _dataloader(self, dataset, shuffle: bool = False) -> DataLoader:
         if dataset is None:

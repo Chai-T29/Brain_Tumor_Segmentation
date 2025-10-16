@@ -11,45 +11,47 @@ import yaml
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 
+
+# --- SimpleMetricCheckpoint callback inserted here ---
+class SimpleMetricCheckpoint(pl.Callback):
+    """Minimal best/last saver that doesn't rely on ModelCheckpoint internals."""
+    def __init__(self, dirpath: str, monitor: str, mode: str = "max", save_last: bool = True) -> None:
+        super().__init__()
+        self.dirpath = Path(dirpath)
+        self.monitor = monitor
+        self.mode = mode
+        self.best = None
+        self.save_last = save_last
+        self.dirpath.mkdir(parents=True, exist_ok=True)
+    def on_validation_epoch_end(self, trainer, pl_module) -> None:
+        metrics = getattr(trainer, "callback_metrics", {})
+        value = metrics.get(self.monitor, None)
+        if value is None:
+            return
+        try:
+            if isinstance(value, torch.Tensor):
+                score = float(value.detach().cpu().item())
+            else:
+                score = float(value)
+        except Exception as e:
+            return
+        improved = False
+        if self.best is None:
+            improved = True
+        else:
+            improved = (score > self.best) if self.mode == "max" else (score < self.best)
+        if improved:
+            self.best = score
+            best_path = self.dirpath / f"best-epoch{int(pl_module.current_epoch):02d}-{self.monitor.replace('/', '_')}{score:.4f}.ckpt"
+            trainer.save_checkpoint(str(best_path))
+        if self.save_last:
+            last_path = self.dirpath / "last.ckpt"
+            trainer.save_checkpoint(str(last_path))
+
 from data.data_module import BrainTumorDataModule
 from rl.lightning_module import TD3Lightning
 
 
-class LightweightGPUUtilization(pl.Callback):
-    """Logs lightweight throughput metrics for quick performance sanity checks."""
-
-    def __init__(self, log_every_n_steps: int = 50):
-        super().__init__()
-        self.log_every_n_steps = max(1, int(log_every_n_steps))
-        self._t_batch_start = 0.0
-        self._t_prev_end = 0.0
-        self._data_time = 0.0
-
-    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
-        now = torch.cuda.Event(enable_timing=True) if torch.cuda.is_available() else None
-        import time
-
-        now_time = time.perf_counter()
-        self._data_time = 0.0 if self._t_prev_end == 0.0 else max(0.0, now_time - self._t_prev_end)
-        self._t_batch_start = now_time
-
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        import time
-
-        if self._t_batch_start == 0.0:
-            return
-        now = time.perf_counter()
-        compute_time = max(0.0, now - self._t_batch_start)
-        total_time = compute_time + self._data_time
-        util_ratio = compute_time / total_time if total_time > 0 else 0.0
-
-        gs = trainer.global_step or 0
-        if gs % self.log_every_n_steps == 0:
-            pl_module.log("util/compute_time", compute_time, prog_bar=False, on_step=True, logger=True)
-            pl_module.log("util/data_time", self._data_time, prog_bar=False, on_step=True, logger=True)
-            pl_module.log("util/compute_ratio", util_ratio, prog_bar=True, on_step=True, logger=True)
-
-        self._t_prev_end = now
 
 
 def load_config(path: str) -> Dict:
@@ -112,17 +114,31 @@ def main() -> None:
         name=logging_cfg.get("logger_name", "td3_agent"),
     )
 
-    checkpoint_dir = Path(logger.log_dir) / logging_cfg.get("checkpoint_dir", "checkpoints")
+    checkpoint_dir = Path(logger.log_dir) / Path(logging_cfg.get("checkpoint_dir", "checkpoints")).name
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    # Monitor the exact key logged by the LightningModule: "val_mean_iou"
     checkpoint_callback = ModelCheckpoint(
-        monitor="train/final_iou",
+        monitor="val_mean_iou",
         dirpath=str(checkpoint_dir),
-        filename="td3-epoch{epoch:02d}-fiou{train/final_iou:.3f}",
+        filename="td3-epoch{epoch:02d}-val_miou{val_mean_iou:.2f}",
         mode="max",
         save_top_k=3,
+        save_last=True,
+        save_on_train_epoch_end=False,
     )
 
-    util_interval = logging_cfg.get("util_monitor_interval", 100)
-    callbacks = [LightweightGPUUtilization(log_every_n_steps=util_interval), checkpoint_callback]
+    # Create simple metric-based checkpoint saver
+    simple_ckpt = SimpleMetricCheckpoint(
+        dirpath=str(checkpoint_dir),
+        monitor="val_mean_iou",
+        mode="max",
+        save_last=True,
+    )
+
+    callbacks = [
+        checkpoint_callback,
+        simple_ckpt,
+    ]
 
     trainer = pl.Trainer(
         accelerator="auto",
@@ -131,9 +147,11 @@ def main() -> None:
         max_epochs=training_cfg.get("max_epochs", 40),
         logger=logger,
         callbacks=callbacks,
+        check_val_every_n_epoch=1,
         precision=training_cfg.get("precision", "32-true"),
         enable_model_summary=True,
         log_every_n_steps=training_cfg.get("log_interval", 50),
+        enable_checkpointing=True,
     )
 
     trainer.fit(model, datamodule=data_module)

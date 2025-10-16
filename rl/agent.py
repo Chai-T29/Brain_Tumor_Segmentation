@@ -33,6 +33,8 @@ class TD3Config:
     embedding_noise_std: float = 0.01
     actor_hidden_sizes: tuple[int, ...] = (512, 512)
     critic_hidden_sizes: tuple[int, ...] = (512, 512)
+    guided_exploration: bool = False
+    guidance_scale: float = 0.2
 
 
 class TD3Agent(nn.Module):
@@ -80,6 +82,39 @@ class TD3Agent(nn.Module):
         noise = torch.randn_like(embedding) * self.config.embedding_noise_std
         return embedding + noise
 
+    def _guided_exploration_mean(
+        self,
+        embedding: torch.Tensor,
+        polygon_state: torch.Tensor,
+        base_action: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute a guidance vector using the critic gradient to bias exploration."""
+
+        if not self.config.guided_exploration:
+            return base_action
+
+        guidance_scale = float(self.config.guidance_scale)
+        if guidance_scale <= 0.0:
+            return base_action
+
+        base = base_action.detach()
+        with torch.enable_grad():
+            action_var = base.clone().requires_grad_(True)
+            emb = embedding.detach()
+            poly = polygon_state.detach()
+            # Critic gradients point toward higher Q; normalise to get a direction.
+            q1 = self.critic.q1_forward(emb, poly, action_var)
+            grad = torch.autograd.grad(q1.sum(), action_var, retain_graph=False, allow_unused=False)[0]
+
+        if grad is None:
+            return base_action
+
+        grad = grad.detach()
+        grad_norm = grad.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+        guidance = grad / grad_norm
+        guided_mean = base + guidance_scale * guidance
+        return guided_mean.clamp(-1.0, 1.0)
+
     @torch.no_grad()
     def act(
         self,
@@ -89,13 +124,18 @@ class TD3Agent(nn.Module):
         apply_embedding_noise: bool = True,
     ) -> torch.Tensor:
         self.actor.eval()
+        if self.config.guided_exploration:
+            self.critic.eval()
         emb = self._augment_embedding(embedding) if apply_embedding_noise else embedding
         action = self.actor(emb, polygon_state)
         if not deterministic:
             sigma = self._current_exploration_sigma()
             if sigma > 0:
+                mean_action = action
+                if self.config.guided_exploration:
+                    mean_action = self._guided_exploration_mean(emb, polygon_state, action)
                 noise = torch.randn_like(action) * sigma
-                action = action + noise
+                action = mean_action + noise
             self._interaction_count += embedding.size(0)
         return action.clamp_(-1.0, 1.0)
 
