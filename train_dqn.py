@@ -95,13 +95,13 @@ def main() -> None:
     )
 
     data_module.setup(stage="fit")
-    if data_module.embedding_dim is None:
-        raise RuntimeError("Failed to prepare embedding memmaps; embedding_dim is undefined.")
+    if data_module.embedding_shape is None:
+        raise RuntimeError("Failed to prepare embedding memmaps; embedding_shape is undefined.")
 
     replay_capacity = int(algo_cfg.pop("replay_capacity", 200000))
 
     model = TD3Lightning(
-        embedding_dim=data_module.embedding_dim,
+        embedding_shape=data_module.embedding_shape,
         env_cfg=env_cfg,
         algo_cfg=algo_cfg,
         training_cfg=training_cfg,

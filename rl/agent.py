@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
+import math
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch import optim
 
 from .networks import Actor, Critic
@@ -31,10 +31,33 @@ class TD3Config:
     target_policy_noise_clip: float = 0.5
     max_grad_norm: float = 10.0
     embedding_noise_std: float = 0.01
+    embedding_projected_dim: int = 512
+    pr_alpha: float = 0.6
+    pr_beta_start: float = 0.4
+    pr_beta_steps: int = 200000
+    pr_eps: float = 1e-6
     actor_hidden_sizes: tuple[int, ...] = (512, 512)
     critic_hidden_sizes: tuple[int, ...] = (512, 512)
     guided_exploration: bool = False
     guidance_scale: float = 0.2
+
+
+class EmbeddingProjector(nn.Module):
+    """Fixed random projection that flattens spatial features into a compact vector."""
+
+    def __init__(self, in_shape: Tuple[int, int, int], out_dim: int) -> None:
+        super().__init__()
+        channels, height, width = in_shape
+        self.in_dim = int(channels * height * width)
+        self.out_dim = int(out_dim)
+        self.fc = nn.Linear(self.in_dim, self.out_dim, bias=False)
+        nn.init.normal_(self.fc.weight, mean=0.0, std=1.0 / math.sqrt(self.out_dim))
+        for param in self.fc.parameters():
+            param.requires_grad = False
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        flattened = x.flatten(start_dim=1)
+        return self.fc(flattened)
 
 
 class TD3Agent(nn.Module):
@@ -42,7 +65,7 @@ class TD3Agent(nn.Module):
 
     def __init__(
         self,
-        embedding_dim: int,
+        embedding_shape: Tuple[int, int, int],
         polygon_dim: int,
         action_dim: int,
         config: TD3Config,
@@ -51,13 +74,21 @@ class TD3Agent(nn.Module):
         super().__init__()
         self.config = config
         self.device = device or torch.device("cpu")
+        channel_dim, _, _ = embedding_shape
 
-        self.actor = Actor(embedding_dim, polygon_dim, action_dim, self.config.actor_hidden_sizes).to(self.device)
-        self.actor_target = Actor(embedding_dim, polygon_dim, action_dim, self.config.actor_hidden_sizes).to(self.device)
+        self.embedding_projector = EmbeddingProjector(
+            in_shape=embedding_shape,
+            out_dim=int(config.embedding_projected_dim),
+        ).to(self.device)
+        self.embedding_norm = nn.LayerNorm(int(config.embedding_projected_dim), elementwise_affine=False).to(self.device)
+        self.embedding_dim = int(config.embedding_projected_dim)
+
+        self.actor = Actor(self.embedding_dim, polygon_dim, action_dim, self.config.actor_hidden_sizes).to(self.device)
+        self.actor_target = Actor(self.embedding_dim, polygon_dim, action_dim, self.config.actor_hidden_sizes).to(self.device)
         self.actor_target.load_state_dict(self.actor.state_dict())
 
-        self.critic = Critic(embedding_dim, polygon_dim, action_dim, self.config.critic_hidden_sizes).to(self.device)
-        self.critic_target = Critic(embedding_dim, polygon_dim, action_dim, self.config.critic_hidden_sizes).to(self.device)
+        self.critic = Critic(self.embedding_dim, polygon_dim, action_dim, self.config.critic_hidden_sizes).to(self.device)
+        self.critic_target = Critic(self.embedding_dim, polygon_dim, action_dim, self.config.critic_hidden_sizes).to(self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
 
         self.actor_opt = optim.Adam(self.actor.parameters(), lr=config.actor_lr)
@@ -75,6 +106,15 @@ class TD3Agent(nn.Module):
         if isinstance(device_arg, torch.device):
             self.device = device_arg
         return module
+
+    def preprocess_embeddings(self, embedding_map: torch.Tensor) -> torch.Tensor:
+        """Project encoder feature maps into a compact vector representation."""
+        if embedding_map.dim() != 4:
+            raise ValueError("Expected embedding map with shape [B, C, H, W].")
+        embedding_map = embedding_map.to(self.device)
+        projected = self.embedding_projector(embedding_map)
+        normalized = self.embedding_norm(projected)
+        return normalized
 
     def _augment_embedding(self, embedding: torch.Tensor) -> torch.Tensor:
         if self.config.embedding_noise_std <= 0:
@@ -139,7 +179,7 @@ class TD3Agent(nn.Module):
             self._interaction_count += embedding.size(0)
         return action.clamp_(-1.0, 1.0)
 
-    def update(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
+    def update(self, batch: Dict[str, torch.Tensor], weights: Optional[torch.Tensor] = None) -> Dict[str, float | torch.Tensor]:
         self.actor.train()
         self.critic.train()
 
@@ -149,6 +189,11 @@ class TD3Agent(nn.Module):
         reward = batch["reward"]
         discount = batch["discount"]
         next_polygon = batch["next_polygon"]
+        if weights is None:
+            weights = torch.ones_like(reward)
+        if weights.dim() == 1:
+            weights = weights.view(-1, 1)
+        weights = weights.to(embedding.device)
 
         # Critics update -----------------------------------------------------
         emb_aug = self._augment_embedding(embedding)
@@ -167,14 +212,16 @@ class TD3Agent(nn.Module):
             target_q = torch.min(target_q1, target_q2)
             target_value = reward + discount * target_q
 
-        critic_loss = F.mse_loss(current_q1, target_value) + F.mse_loss(current_q2, target_value)
+        td_error1 = target_value - current_q1
+        td_error2 = target_value - current_q2
+        critic_loss = (weights * td_error1.pow(2)).mean() + (weights * td_error2.pow(2)).mean()
 
         self.critic_opt.zero_grad(set_to_none=True)
         critic_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.config.max_grad_norm)
         self.critic_opt.step()
 
-        metrics: Dict[str, float] = {"critic_loss": float(critic_loss.item())}
+        metrics: Dict[str, float | torch.Tensor] = {"critic_loss": float(critic_loss.item())}
 
         # Actor update -------------------------------------------------------
         update_actor = (self.total_updates + 1) % max(1, self.config.policy_delay) == 0
@@ -191,6 +238,10 @@ class TD3Agent(nn.Module):
 
             self._soft_update(self.actor, self.actor_target)
             self._soft_update(self.critic, self.critic_target)
+
+        td_errors = 0.5 * (torch.abs(td_error1.detach()) + torch.abs(td_error2.detach()))
+        td_errors = td_errors.flatten()
+        metrics["td_errors"] = td_errors
 
         self.total_updates += 1
         return metrics

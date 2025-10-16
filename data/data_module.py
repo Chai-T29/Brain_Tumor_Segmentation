@@ -87,7 +87,7 @@ class BrainTumorDataModule(pl.LightningDataModule):
 
         self._cache_prepared = False
         self._groups: List[Dict[str, Any]] = []
-        self.embedding_dim: Optional[int] = None
+        self.embedding_shape: Optional[tuple[int, int, int]] = None
         self.embedding_model_name: Optional[str] = None
 
     # ------------------------------------------------------------------ #
@@ -209,12 +209,10 @@ class BrainTumorDataModule(pl.LightningDataModule):
         device = torch.device(device_str)
         encoder.to(device)
 
-        embedding_dir = os.path.join(
-            self.data_dir, "embeddings", encoder_config.name
-        )
+        embedding_dir = os.path.join(self.data_dir, "embeddings", encoder_config.name)
         os.makedirs(embedding_dir, exist_ok=True)
 
-        embedding_dim = int(encoder.embedding_dim)
+        embedding_shape = encoder.feature_shape
         for group in tqdm(groups, desc="Computing embeddings"):
             img_mm_path = group["image_mm"]
             embedding_mm_path = os.path.join(
@@ -223,7 +221,7 @@ class BrainTumorDataModule(pl.LightningDataModule):
             group["embedding_mm"] = embedding_mm_path
             if os.path.exists(embedding_mm_path):
                 existing = np.load(embedding_mm_path, mmap_mode="r")
-                if existing.shape[1] == embedding_dim:
+                if existing.shape[1:] == embedding_shape:
                     del existing
                     continue
                 del existing
@@ -235,7 +233,7 @@ class BrainTumorDataModule(pl.LightningDataModule):
                 embedding_mm_path,
                 mode="w+",
                 dtype="float32",
-                shape=(depth, embedding_dim),
+                shape=(depth, *embedding_shape),
             )
 
             for start in range(0, depth, self.embedding_batch_size):
@@ -246,10 +244,10 @@ class BrainTumorDataModule(pl.LightningDataModule):
                 batch = torch.from_numpy(batch_np).unsqueeze(1).to(device=device)
                 with torch.no_grad():
                     batch_emb = encoder.embed_without_noise(batch)
-                emb_mm[start:end, :] = batch_emb.cpu().numpy()
+                emb_mm[start:end, ...] = batch_emb.cpu().numpy()
             del emb_mm
 
-        self.embedding_dim = embedding_dim
+        self.embedding_shape = embedding_shape
         self.embedding_model_name = encoder_config.name
         self._groups = groups
         self._cache_prepared = True
@@ -275,13 +273,13 @@ class BrainTumorDataModule(pl.LightningDataModule):
                 "Cached memmaps/embeddings not found. Please run a 'fit' stage first to prepare the cache."
             )
 
-        # Index available embeddings by key -> path, and infer embedding_dim/model_name
+        # Index available embeddings by key -> path, and infer embedding shape/model_name
         emb_dirs = [
             d for d in os.listdir(emb_root)
             if os.path.isdir(os.path.join(emb_root, d))
         ]
         emb_index = {}
-        embedding_dim = None
+        embedding_shape = None
         embedding_model_name = None
         for d in emb_dirs:
             dpath = os.path.join(emb_root, d)
@@ -292,9 +290,9 @@ class BrainTumorDataModule(pl.LightningDataModule):
                 path = os.path.join(dpath, fname)
                 # first occurrence wins
                 emb_index.setdefault(key, path)
-                if embedding_dim is None:
+                if embedding_shape is None:
                     arr = np.load(path, mmap_mode="r")
-                    embedding_dim = int(arr.shape[1])
+                    embedding_shape = tuple(int(v) for v in arr.shape[1:])
                     del arr
                     embedding_model_name = d
 
@@ -349,7 +347,7 @@ class BrainTumorDataModule(pl.LightningDataModule):
             )
 
         # Populate module state
-        self.embedding_dim = embedding_dim
+        self.embedding_shape = embedding_shape
         self.embedding_model_name = embedding_model_name
         self._groups = groups
         self._cache_prepared = True
@@ -449,3 +447,10 @@ class BrainTumorDataModule(pl.LightningDataModule):
 
     def test_dataloader(self) -> DataLoader:
         return self._dataloader(self.test_dataset, shuffle=False)
+
+    @property
+    def embedding_dim(self) -> Optional[int]:
+        if self.embedding_shape is None:
+            return None
+        c, h, w = self.embedding_shape
+        return int(c * h * w)

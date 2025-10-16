@@ -29,7 +29,7 @@ class TrainingConfig:
 class TD3Lightning(pl.LightningModule):
     def __init__(
         self,
-        embedding_dim: int,
+        embedding_shape: Tuple[int, int, int],
         env_cfg: Dict,
         algo_cfg: Dict,
         training_cfg: Dict,
@@ -39,9 +39,9 @@ class TD3Lightning(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
 
-        if embedding_dim <= 0:
-            raise ValueError("embedding_dim must be a positive integer")
-        self.embedding_dim = int(embedding_dim)
+        if len(embedding_shape) != 3:
+            raise ValueError("embedding_shape must be a tuple of (C, H, W).")
+        self.embedding_shape = tuple(int(v) for v in embedding_shape)
         self.env_config = EnvironmentConfig(**env_cfg)
         self.environment = PolygonLocalizationEnv(self.env_config)
         env_config_copy = EnvironmentConfig(**asdict(self.env_config))
@@ -65,20 +65,25 @@ class TD3Lightning(pl.LightningModule):
         self._test_episode_index = 0
         self._test_epoch_outputs: List[Dict[str, torch.Tensor]] = []
 
-        polygon_dim = self.env_config.num_sides * 4
+        polygon_dim = self.environment.state_dim
         self.agent = TD3Agent(
-            embedding_dim=self.embedding_dim,
+            embedding_shape=self.embedding_shape,
             polygon_dim=polygon_dim,
             action_dim=self.environment.action_dim,
             config=self.algo_config,
         )
         self.agent.set_warmup_steps(self.training_config.warmup_steps)
 
+        self.embedding_dim = self.agent.embedding_dim
         self.replay = ReplayBuffer(
             capacity=replay_capacity,
             embedding_dim=self.embedding_dim,
             polygon_dim=polygon_dim,
             action_dim=self.environment.action_dim,
+            alpha=self.algo_config.pr_alpha,
+            beta_start=self.algo_config.pr_beta_start,
+            beta_steps=self.algo_config.pr_beta_steps,
+            eps=self.algo_config.pr_eps,
         )
         self._global_step_interactions = 0
 
@@ -114,7 +119,9 @@ class TD3Lightning(pl.LightningModule):
         masks = batch["mask"].to(self.device, non_blocking=True)
         batch_size = images.size(0)
 
-        embeddings = batch["embedding"].to(self.device, non_blocking=True)
+        embedding_maps = batch["embedding"].to(self.device, non_blocking=True)
+        with torch.no_grad():
+            embeddings = self.agent.preprocess_embeddings(embedding_maps)
         embeddings_cpu = embeddings.detach().cpu()
 
         polygon_state_cpu = self.environment.reset(images.cpu(), masks.cpu())
@@ -143,19 +150,29 @@ class TD3Lightning(pl.LightningModule):
         critic_update_count = 0
         actor_update_count = 0
 
+        action_norm_total = 0.0
+        distance_norm_total = 0.0
+        angle_norm_total = 0.0
+        stop_abs_total = 0.0
+        action_measure_count = 0
+
         def _maybe_run_updates() -> None:
             nonlocal performed_updates, critic_loss_sum, actor_loss_sum
             nonlocal critic_update_count, actor_update_count
             while performed_updates < batch_steps_completed // updates_trigger:
                 if len(self.replay) < self.training_config.update_batch_size:
                     break
-                batch_samples = self.replay.sample(self.training_config.update_batch_size, device=self.device)
-                metrics = self.agent.update(batch_samples)
+                batch_samples, batch_indices, batch_weights = self.replay.sample(
+                    self.training_config.update_batch_size, device=self.device
+                )
+                metrics = self.agent.update(batch_samples, weights=batch_weights)
                 critic_loss_sum += metrics["critic_loss"]
                 critic_update_count += 1
                 if "actor_loss" in metrics:
                     actor_loss_sum += metrics["actor_loss"]
                     actor_update_count += 1
+                if "td_errors" in metrics:
+                    self.replay.update_priorities(batch_indices, metrics["td_errors"])
                 performed_updates += 1
 
         for _ in range(max_collect_steps):
@@ -170,6 +187,14 @@ class TD3Lightning(pl.LightningModule):
             chosen_actions = self.agent.act(embeddings[active_indices], polygon_state[active_indices], deterministic=False)
             actions[active_indices] = chosen_actions
             actions_cpu = actions.detach().cpu()
+
+            action_norm_total += float(actions.norm(dim=-1).sum().item())
+            action_measure_count += actions.size(0)
+            if actions.size(1) > 1:
+                line_actions = actions[:, :-1].view(batch_size, self.environment.num_lines, 2)
+                distance_norm_total += float(torch.linalg.norm(line_actions[..., 0], dim=-1).sum().item())
+                angle_norm_total += float(torch.linalg.norm(line_actions[..., 1], dim=-1).sum().item())
+            stop_abs_total += float(actions[:, -1].abs().sum().item())
 
             alive_before = alive_mask.clone()
             next_polygon_cpu, reward_cpu, done_cpu, info = self.environment.step(actions_cpu)
@@ -248,6 +273,14 @@ class TD3Lightning(pl.LightningModule):
 
         _maybe_run_updates()
 
+        norm_count = max(1, action_measure_count)
+        norm_metrics = {
+            "train/action_norm": action_norm_total / norm_count,
+            "train/distance_norm": distance_norm_total / norm_count,
+            "train/angle_norm": angle_norm_total / norm_count,
+            "train/stop_abs": stop_abs_total / norm_count,
+        }
+
         mean_critic_loss = (
             float(critic_loss_sum / critic_update_count) if critic_update_count > 0 else 0.0
         )
@@ -272,6 +305,8 @@ class TD3Lightning(pl.LightningModule):
             prog_bar=True,
             sync_dist=False,
         )
+
+        self.log_dict(norm_metrics, on_step=False, on_epoch=True, prog_bar=False, sync_dist=False)
 
         return torch.tensor(mean_critic_loss, device=self.device)
 
@@ -326,7 +361,9 @@ class TD3Lightning(pl.LightningModule):
     ) -> Tuple[Dict[str, torch.Tensor], Optional[List[np.ndarray]]]:
         images = batch["image"].to(self.device, non_blocking=True)
         masks = batch["mask"].to(self.device, non_blocking=True)
-        embeddings = batch["embedding"].to(self.device, non_blocking=True)
+        embedding_maps = batch["embedding"].to(self.device, non_blocking=True)
+        with torch.no_grad():
+            embeddings = self.agent.preprocess_embeddings(embedding_maps)
 
         state_cpu = env.reset(images.cpu(), masks.cpu())
         state = state_cpu.to(self.device)

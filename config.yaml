@@ -21,13 +21,15 @@ encoder:
 environment:
   num_sides: 32
   max_steps: 100
-  iou_threshold: 0.7
+  iou_low_threshold: 0.2
+  iou_high_threshold: 0.7
   initial_radius: 90.0
-  radial_step_scale: 20.0
-  rotation_step_scale_deg: 5.0
-  length_step_scale: 10.0
-  min_edge_length: 1.0
-  stop_action_threshold: 0.6
+  line_distance_step_scale: 6.0
+  line_angle_step_scale_deg: 5.0
+  line_max_angle_offset_deg: 45.0
+  line_min_distance: 1.0
+  line_max_distance_margin: 1.0
+  stop_action_threshold: 0.5
   reward_success: 4.0
   reward_no_tumor: 2.0
   reward_false_stop: -3.0
@@ -49,8 +51,13 @@ algorithm:
   target_policy_noise_clip: 0.5
   max_grad_norm: 10.0
   embedding_noise_std: 0.01
-  actor_hidden_sizes: [256, 128, 128]
-  critic_hidden_sizes: [256, 128, 128]
+  embedding_projected_dim: 512
+  pr_alpha: 0.6
+  pr_beta_start: 0.4
+  pr_beta_steps: 200000
+  pr_eps: 1.0e-6
+  actor_hidden_sizes: [512, 256]
+  critic_hidden_sizes: [512, 256]
   replay_capacity: 300000
 
 training:

@@ -22,9 +22,9 @@ class EfficientNetEncoder(nn.Module):
     """Wrapper that exposes EfficientNet feature embeddings for 224×224 slices.
 
     The encoder repeats single-channel slices across RGB channels, feeds them
-    through the selected EfficientNet backbone, and returns the pooled embedding
-    vector prior to the classification head. Optionally, additive Gaussian noise
-    can be injected into the embedding on every forward pass to emulate DrQ-style
+    through the selected EfficientNet backbone, and returns the final convolutional
+    feature map prior to global pooling. Optionally, additive Gaussian noise can be
+    injected into the feature map on every forward pass to emulate DrQ-style
     stochastic augmentation in embedding space.
     """
 
@@ -54,11 +54,11 @@ class EfficientNetEncoder(nn.Module):
         self.features = backbone.features
         self.pool = backbone.avgpool
 
-        if hasattr(backbone.classifier, "in_features"):
-            embedding_dim = backbone.classifier.in_features  # type: ignore[attr-defined]
-        else:
-            embedding_dim = getattr(backbone.classifier[-1], "in_features")
-        self.embedding_dim = int(embedding_dim)
+        with torch.no_grad():
+            probe = torch.zeros(1, 3, 224, 224)
+            feat = self.features(probe)
+        self.feature_shape = (int(feat.size(1)), int(feat.size(2)), int(feat.size(3)))
+        self.feature_dim = int(torch.tensor(self.feature_shape).prod().item())
 
         # Freeze backbone if requested.
         if not config.trainable:
@@ -77,7 +77,7 @@ class EfficientNetEncoder(nn.Module):
         self.register_buffer("rgb_std", std, persistent=False)
 
     def forward(self, images: torch.Tensor, noise: bool = True) -> torch.Tensor:
-        """Return embeddings for a batch of `[B, 1, 224, 224]` slices."""
+        """Return feature maps for a batch of `[B, 1, 224, 224]` slices."""
         if images.dim() != 4 or images.size(1) != 1:
             raise ValueError("Expected input shape [B, 1, H, W].")
 
@@ -86,13 +86,10 @@ class EfficientNetEncoder(nn.Module):
         x = (x - self.rgb_mean.to(x.device, x.dtype)) / self.rgb_std.to(x.device, x.dtype)
 
         feats = self.features(x)
-        pooled = self.pool(feats)
-        embedding = pooled.view(pooled.size(0), -1)
-
         if noise and self.config.embedding_noise_std > 0:
-            noise_tensor = torch.randn_like(embedding) * self.config.embedding_noise_std
-            embedding = embedding + noise_tensor
-        return embedding
+            noise_tensor = torch.randn_like(feats) * self.config.embedding_noise_std
+            feats = feats + noise_tensor
+        return feats
 
     def embed_without_noise(self, images: torch.Tensor) -> torch.Tensor:
         return self.forward(images, noise=False)

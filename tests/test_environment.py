@@ -7,11 +7,14 @@ def _build_env(**overrides):
     cfg = EnvironmentConfig(
         num_sides=32,
         max_steps=5,
-        iou_threshold=0.0,
+        iou_low_threshold=0.0,
+        iou_high_threshold=0.0,
         initial_radius=8.0,
-        radial_step_scale=2.0,
-        rotation_step_scale_deg=5.0,
-        length_step_scale=2.0,
+        line_distance_step_scale=2.0,
+        line_angle_step_scale_deg=5.0,
+        line_max_angle_offset_deg=45.0,
+        line_min_distance=1.0,
+        line_max_distance_margin=1.0,
         stop_action_threshold=0.0,
         reward_success=3.0,
         reward_no_tumor=2.0,
@@ -29,11 +32,11 @@ def test_reset_returns_expected_shape():
     images = torch.zeros(2, 1, 32, 32)
     masks = torch.zeros(2, 1, 32, 32)
     state = env.reset(images, masks)
-    assert state.shape == (2, env.config.num_sides * 4)
+    assert state.shape == (2, env.state_dim)
 
 
 def test_stop_action_success_reward():
-    env = _build_env(iou_threshold=0.0, stop_action_threshold=-0.5)
+    env = _build_env(iou_low_threshold=0.0, iou_high_threshold=0.0, stop_action_threshold=-0.5)
     images = torch.zeros(1, 1, 32, 32)
     masks = torch.zeros(1, 1, 32, 32)
     masks[:, :, 10:22, 10:22] = 1.0
@@ -64,7 +67,7 @@ def test_no_tumor_stop_reward_matches_config():
 
 
 def test_actions_keep_vertices_within_bounds():
-    env = _build_env(radial_step_scale=50.0)
+    env = _build_env(line_distance_step_scale=50.0)
     images = torch.zeros(1, 1, 32, 32)
     masks = torch.zeros(1, 1, 32, 32)
     env.reset(images, masks)
@@ -78,4 +81,4 @@ def test_actions_keep_vertices_within_bounds():
     assert vertices[..., 0].max().item() <= 31.0
     assert vertices[..., 1].min().item() >= 0.0
     assert vertices[..., 1].max().item() <= 31.0
-    assert state.shape == (1, env.config.num_sides * 4)
+    assert state.shape == (1, env.state_dim)
