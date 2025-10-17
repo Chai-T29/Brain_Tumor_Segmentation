@@ -33,7 +33,9 @@ class NormalizeSlice:
             std = image.std().clamp(min=1e-6)
         image = (image - mean) / std
         image = image.clamp_(-6, 6)
-        result = {"image": image, "mask": mask}
+        result = dict(sample)
+        result["image"] = image
+        result["mask"] = mask
         if embedding is not None:
             result["embedding"] = embedding
         if meta is not None:
@@ -64,6 +66,7 @@ class BrainTumorDataModule(pl.LightningDataModule):
         encoder_config: Optional[Dict] = None,
         embedding_batch_size: int = 128,
         embedding_device: Optional[str] = None,
+        environment_config: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__()
         self.data_dir = data_dir
@@ -80,6 +83,7 @@ class BrainTumorDataModule(pl.LightningDataModule):
         self.encoder_config_dict = dict(encoder_config or {})
         self.embedding_batch_size = max(1, int(embedding_batch_size))
         self.embedding_device = embedding_device
+        self.environment_config_dict = dict(environment_config or {})
 
         self.train_dataset = None
         self.val_dataset = None
@@ -409,7 +413,12 @@ class BrainTumorDataModule(pl.LightningDataModule):
         val_samples = expand(val_groups)
         test_samples = expand(test_groups)
 
-        dataset_kwargs = dict(transform=self.transform, resize_shape=None)
+        env_cfg = self.environment_config_dict or None
+        dataset_kwargs = dict(
+            transform=self.transform,
+            resize_shape=None,
+            environment_config=env_cfg,
+        )
         if need_train:
             self.train_dataset = BrainTumorDataset.from_samples(train_samples, **dataset_kwargs)
         if need_val:

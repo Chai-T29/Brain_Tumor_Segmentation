@@ -39,6 +39,7 @@ class TD3Config:
     actor_hidden_sizes: tuple[int, ...] = (512, 512)
     critic_hidden_sizes: tuple[int, ...] = (512, 512)
     guided_exploration: bool = False
+    true_guided_exploration: bool = False
     guidance_scale: float = 0.2
 
 
@@ -162,6 +163,7 @@ class TD3Agent(nn.Module):
         embedding: torch.Tensor,
         polygon_state: torch.Tensor,
         noisy_action: torch.Tensor,
+        sigma: float
     ) -> torch.Tensor:
         """Adjust a noisy action using the critic gradient if it improves value."""
 
@@ -204,19 +206,36 @@ class TD3Agent(nn.Module):
         polygon_state: torch.Tensor,
         deterministic: bool = False,
         apply_embedding_noise: bool = True,
+        guided_targets: torch.Tensor | None = None,
     ) -> torch.Tensor:
         self.actor.eval()
-        if self.config.guided_exploration:
+        if self.config.guided_exploration and not self.config.true_guided_exploration:
             self.critic.eval()
         emb = self._augment_embedding(embedding) if apply_embedding_noise else embedding
         action = self.actor(emb, polygon_state)
+
+        if self.config.true_guided_exploration and guided_targets is not None:
+            guidance_scale = float(self.config.guidance_scale)
+            if guidance_scale > 0.0:
+                # Only blend the main action dimensions (exclude stop component).
+                tgt = guided_targets
+                a = action
+                total_dims = a.size(-1)
+                # Reserve last dim as stop; blend at most total_dims-1 dims.
+                main_dims = max(0, total_dims - 1)
+                # If provided targets are shorter, blend only that many dims.
+                blend_dims = min(main_dims, tgt.size(-1))
+                if blend_dims > 0:
+                    blended = torch.lerp(a[..., :blend_dims], tgt[..., :blend_dims], guidance_scale)
+                    action = torch.cat([blended, a[..., blend_dims:]], dim=-1)
+
         if not deterministic:
             sigma = self._current_exploration_sigma()
             if sigma > 0:
                 noise = torch.randn_like(action) * sigma
                 noisy_action = action + noise
-                if self.config.guided_exploration:
-                    noisy_action = self._guided_exploration_adjust(emb, polygon_state, noisy_action)
+                if self.config.guided_exploration and not self.config.true_guided_exploration:
+                    noisy_action = self._guided_exploration_adjust(emb, polygon_state, noisy_action, sigma)
                 action = noisy_action
             self._interaction_count += embedding.size(0)
         return action.clamp_(-1.0, 1.0)

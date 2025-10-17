@@ -56,6 +56,7 @@ def find_checkpoint(log_dir: Path, logger_name: str, checkpoint_subdir: str) -> 
 def main() -> None:
     config = load_config("config.yaml")
     data_cfg = config.get("data", {})
+    env_cfg = config.get("environment", {})
     training_cfg = config.get("training", {})
     logging_cfg = config.get("logging", {})
 
@@ -73,6 +74,7 @@ def main() -> None:
         encoder_config=config.get("encoder", {}),
         embedding_batch_size=data_cfg.get("embedding_batch_size", 128),
         embedding_device=data_cfg.get("embedding_device"),
+        environment_config=env_cfg,
     )
 
     log_dir = Path(logging_cfg.get("log_dir", "lightning_logs"))

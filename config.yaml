@@ -59,6 +59,8 @@ algorithm:
   actor_hidden_sizes: [512, 256]
   critic_hidden_sizes: [512, 256]
   replay_capacity: 300000
+  true_guided_exploration: true
+  guidance_scale: 0.02
 
 training:
   max_epochs: 40

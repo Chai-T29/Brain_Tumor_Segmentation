@@ -8,6 +8,7 @@ import numpy as np
 import pytorch_lightning as pl
 import torch
 import imageio.v2 as imageio
+import math
 
 from .agent import TD3Agent, TD3Config, NoiseScheduleConfig
 from .environment import EnvironmentConfig, PolygonLocalizationEnv
@@ -44,6 +45,7 @@ class TD3Lightning(pl.LightningModule):
         self.embedding_shape = tuple(int(v) for v in embedding_shape)
         self.env_config = EnvironmentConfig(**env_cfg)
         self.environment = PolygonLocalizationEnv(self.env_config)
+        self.line_action_dim = self.environment.line_action_dim
         env_config_copy = EnvironmentConfig(**asdict(self.env_config))
         self.val_env = PolygonLocalizationEnv(env_config_copy)
         self.test_env = PolygonLocalizationEnv(EnvironmentConfig(**asdict(self.env_config)))
@@ -124,6 +126,16 @@ class TD3Lightning(pl.LightningModule):
             embeddings = self.agent.preprocess_embeddings(embedding_maps)
         embeddings_cpu = embeddings.detach().cpu()
 
+        target_polygon_cpu = batch.get("target_polygon_state")
+        target_polygon = None
+        if target_polygon_cpu is not None:
+            target_polygon_cpu = target_polygon_cpu.to(torch.float32)
+            target_polygon = target_polygon_cpu.to(self.device, non_blocking=True)
+        if self.agent.config.true_guided_exploration and target_polygon is None:
+            raise RuntimeError(
+                "true_guided_exploration is enabled but dataset did not supply 'target_polygon_state'."
+            )
+
         polygon_state_cpu = self.environment.reset(images.cpu(), masks.cpu())
         polygon_state = polygon_state_cpu.to(self.device)
 
@@ -183,14 +195,25 @@ class TD3Lightning(pl.LightningModule):
             prev_polygon_cpu = polygon_state_cpu.clone()
 
             actions = torch.zeros(batch_size, self.environment.action_dim, device=self.device)
-            chosen_actions = self.agent.act(embeddings[active_indices], polygon_state[active_indices], deterministic=False)
+
+            guidance_targets_full = None
+            if self.agent.config.true_guided_exploration and target_polygon is not None:
+                guidance_targets_full = self._compute_true_guidance_targets(polygon_state, target_polygon)
+
+            guided_subset = guidance_targets_full[active_indices] if guidance_targets_full is not None else None
+            chosen_actions = self.agent.act(
+                embeddings[active_indices],
+                polygon_state[active_indices],
+                deterministic=False,
+                guided_targets=guided_subset,
+            )
             actions[active_indices] = chosen_actions
             actions_cpu = actions.detach().cpu()
 
             action_norm_total += float(actions.norm(dim=-1).sum().item())
             action_measure_count += actions.size(0)
-            if actions.size(1) > 0:
-                line_actions = actions.view(batch_size, self.environment.num_lines, 2)
+            if self.line_action_dim > 0:
+                line_actions = actions[:, : self.line_action_dim].view(batch_size, self.environment.num_lines, 2)
                 distance_norm_total += float(torch.linalg.norm(line_actions[..., 0], dim=-1).sum().item())
                 angle_norm_total += float(torch.linalg.norm(line_actions[..., 1], dim=-1).sum().item())
 
@@ -306,6 +329,52 @@ class TD3Lightning(pl.LightningModule):
         self.log_dict(norm_metrics, on_step=False, on_epoch=True, prog_bar=False, sync_dist=False)
 
         return torch.tensor(mean_critic_loss, device=self.device)
+
+    @staticmethod
+    def _wrap_degrees(delta: torch.Tensor) -> torch.Tensor:
+        """Wrap degree differences to [-180, 180]."""
+        return (delta + 180.0).remainder(360.0) - 180.0
+
+    def _compute_true_guidance_targets(
+        self,
+        current_state: torch.Tensor,
+        target_state: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute normalised main-action targets (distance/angle only), no stop guidance."""
+        device = current_state.device
+        if target_state.device != device:
+            target_state = target_state.to(device)
+
+        num_lines = self.environment.num_lines
+        if current_state.size(-1) < num_lines * 2 or target_state.size(-1) < num_lines * 2:
+            raise ValueError("Current/target polygon state does not match expected dimensions.")
+
+        distance_scale = max(1e-6, float(self.env_config.line_distance_step_scale))
+        angle_step_rad = max(1e-6, math.radians(self.env_config.line_angle_step_scale_deg))
+
+        current_dist = current_state[:, :num_lines]
+        current_angle = current_state[:, num_lines:]
+
+        target_dist = target_state[:, :num_lines]
+        target_angle = target_state[:, num_lines:]
+
+        dist_diff = target_dist - current_dist
+        angle_diff_deg = self._wrap_degrees(target_angle - current_angle)
+
+        distance_actions = torch.clamp(dist_diff / distance_scale, min=-1.0, max=1.0)
+        angle_diff_rad = torch.deg2rad(angle_diff_deg)
+        angle_actions = torch.clamp(angle_diff_rad / angle_step_rad, min=-1.0, max=1.0)
+
+        distance_threshold = distance_scale
+        angle_threshold = float(self.env_config.line_angle_step_scale_deg)
+
+        dist_close = (dist_diff.abs() <= distance_threshold).all(dim=1)
+        angle_close = (angle_diff_deg.abs() <= angle_threshold).all(dim=1)
+        should_stop = dist_close & angle_close
+
+        # Only return the main action components (distance + angle), exclude stop.
+        guided_main = torch.cat([distance_actions, angle_actions], dim=1)
+        return guided_main.clamp(-1.0, 1.0)
 
     def validation_step(self, batch, batch_idx: int):
         metrics, _ = self._simulate_environment(self.val_env, batch, deterministic=True, record=False)

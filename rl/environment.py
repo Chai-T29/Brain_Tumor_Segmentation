@@ -41,7 +41,8 @@ class PolygonLocalizationEnv:
             raise ValueError("num_sides must be >= 3.")
         self.config = config
         self.num_lines = int(config.num_sides)
-        self.action_dim = self.num_lines * 2  # distance Δ, angle Δ
+        self.line_action_dim = self.num_lines * 2  # distance Δ, angle Δ
+        self.action_dim = self.line_action_dim + 1  # + stop score
         self.state_dim = self.num_lines * 2   # distances, angle offsets (degrees)
 
         base_angles = torch.linspace(
@@ -134,16 +135,21 @@ class PolygonLocalizationEnv:
             raise ValueError("Action batch does not match environment batch size.")
 
         active = self.active_mask.clone()
-        line_components = actions.view(batch_size, self.num_lines, 2)
-        if active.any():
+        line_flat = actions[..., : self.line_action_dim]
+        stop_scores = actions[..., -1]
+        manual_stop = (stop_scores > 0.0) & active
+
+        line_components = line_flat.view(batch_size, self.num_lines, 2)
+        update_mask = active & (~manual_stop)
+        if update_mask.any():
             distance_delta = line_components[..., 0] * self.config.line_distance_step_scale
             angle_delta = line_components[..., 1] * self._angle_step
-            updated_distances = self.line_distances[active] + distance_delta[active]
-            self.line_distances[active] = updated_distances.clamp(
+            updated_distances = self.line_distances[update_mask] + distance_delta[update_mask]
+            self.line_distances[update_mask] = updated_distances.clamp(
                 self.config.line_min_distance, self._max_distance
             )
-            updated_angles = self.line_angle_offsets[active] + angle_delta[active]
-            self.line_angle_offsets[active] = updated_angles
+            updated_angles = self.line_angle_offsets[update_mask] + angle_delta[update_mask]
+            self.line_angle_offsets[update_mask] = updated_angles
 
         self.step_count = self.step_count + active.long()
         timeout_mask = (self.step_count >= self.config.max_steps) & active
@@ -159,7 +165,8 @@ class PolygonLocalizationEnv:
             dtype=current_iou.dtype,
             device=current_iou.device,
         )
-        stop_mask = (delta_iou.abs() <= stop_delta) & active
+        auto_stop_mask = (delta_iou.abs() <= stop_delta) & active & (~manual_stop)
+        stop_mask = manual_stop | auto_stop_mask
         rewards, success_mask = self._compute_rewards(
             current_iou=current_iou,
             delta_iou=delta_iou,
@@ -177,7 +184,8 @@ class PolygonLocalizationEnv:
             "iou": current_iou.detach(),
             "success": success_mask.detach(),
             "delta_iou": delta_iou.detach(),
-            "auto_stop": stop_mask.detach(),
+            "auto_stop": auto_stop_mask.detach(),
+            "manual_stop": manual_stop.detach(),
         }
         return next_state, rewards.detach(), done.detach(), info
 

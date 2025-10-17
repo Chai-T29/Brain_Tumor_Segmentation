@@ -92,6 +92,7 @@ def main() -> None:
         encoder_config=encoder_cfg,
         embedding_batch_size=data_cfg.get("embedding_batch_size", 128),
         embedding_device=data_cfg.get("embedding_device"),
+        environment_config=env_cfg,
     )
 
     data_module.setup(stage="fit")
