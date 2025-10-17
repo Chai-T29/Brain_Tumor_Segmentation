@@ -30,7 +30,6 @@ class EnvironmentConfig:
     line_max_angle_offset_deg: float = 45.0
     line_min_distance: float = 0.0
     line_max_distance_margin: float = 1.0
-    auto_stop_iou_delta: float = 0.01
 
 
 class PolygonLocalizationEnv:
@@ -160,13 +159,7 @@ class PolygonLocalizationEnv:
         if self.last_iou is None:
             raise RuntimeError("last_iou not initialised.")
         delta_iou = current_iou - self.last_iou
-        stop_delta = torch.tensor(
-            self.config.auto_stop_iou_delta,
-            dtype=current_iou.dtype,
-            device=current_iou.device,
-        )
-        auto_stop_mask = (delta_iou.abs() <= stop_delta) & active & (~manual_stop)
-        stop_mask = manual_stop | auto_stop_mask
+        stop_mask = manual_stop
         rewards, success_mask = self._compute_rewards(
             current_iou=current_iou,
             delta_iou=delta_iou,
@@ -184,7 +177,6 @@ class PolygonLocalizationEnv:
             "iou": current_iou.detach(),
             "success": success_mask.detach(),
             "delta_iou": delta_iou.detach(),
-            "auto_stop": auto_stop_mask.detach(),
             "manual_stop": manual_stop.detach(),
         }
         return next_state, rewards.detach(), done.detach(), info

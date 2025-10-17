@@ -28,7 +28,6 @@ environment:
   line_max_angle_offset_deg: 45.0
   line_min_distance: 0.0
   line_max_distance_margin: 1.0
-  auto_stop_iou_delta: 0.01
   reward_success: 4.0
   reward_no_tumor: 2.0
   reward_false_stop: -3.0
