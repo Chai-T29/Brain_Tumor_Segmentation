@@ -20,7 +20,7 @@ encoder:
 
 environment:
   num_sides: 32
-  max_steps: 100
+  max_steps: 60
   iou_low_threshold: 0.2
   iou_high_threshold: 0.7
   initial_radius: 90.0
@@ -59,7 +59,7 @@ algorithm:
   critic_hidden_sizes: [512, 256]
   replay_capacity: 300000
   true_guided_exploration: true
-  guidance_scale: 0.02
+  guidance_scale: 0.7
 
 training:
   max_epochs: 40
