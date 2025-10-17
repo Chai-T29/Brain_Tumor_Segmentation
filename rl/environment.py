@@ -20,7 +20,6 @@ class EnvironmentConfig:
     iou_low_threshold: float = 0.2
     iou_high_threshold: float = 0.7
     initial_radius: float = 90.0
-    stop_action_threshold: float = 0.6
     reward_success: float = 4.0
     reward_no_tumor: float = 2.0
     reward_false_stop: float = -3.0
@@ -29,8 +28,9 @@ class EnvironmentConfig:
     line_distance_step_scale: float = 6.0
     line_angle_step_scale_deg: float = 5.0
     line_max_angle_offset_deg: float = 45.0
-    line_min_distance: float = 1.0
+    line_min_distance: float = 0.0
     line_max_distance_margin: float = 1.0
+    auto_stop_iou_delta: float = 0.01
 
 
 class PolygonLocalizationEnv:
@@ -41,14 +41,13 @@ class PolygonLocalizationEnv:
             raise ValueError("num_sides must be >= 3.")
         self.config = config
         self.num_lines = int(config.num_sides)
-        self.action_dim = self.num_lines * 2 + 1  # distance Δ, angle Δ, stop
-        self.state_dim = self.num_lines * 3       # cos θ, sin θ, distance
+        self.action_dim = self.num_lines * 2  # distance Δ, angle Δ
+        self.state_dim = self.num_lines * 2   # distances, angle offsets (degrees)
 
         base_angles = torch.linspace(
             0.0, 2 * math.pi, steps=self.num_lines + 1, dtype=torch.float32
         )[:-1]
         self._base_angles = base_angles
-        self._max_angle_offset = math.radians(config.line_max_angle_offset_deg)
         self._angle_step = math.radians(config.line_angle_step_scale_deg)
 
         # State buffers initialised in reset.
@@ -135,7 +134,7 @@ class PolygonLocalizationEnv:
             raise ValueError("Action batch does not match environment batch size.")
 
         active = self.active_mask.clone()
-        line_components = actions[:, :-1].view(batch_size, self.num_lines, 2)
+        line_components = actions.view(batch_size, self.num_lines, 2)
         if active.any():
             distance_delta = line_components[..., 0] * self.config.line_distance_step_scale
             angle_delta = line_components[..., 1] * self._angle_step
@@ -144,13 +143,7 @@ class PolygonLocalizationEnv:
                 self.config.line_min_distance, self._max_distance
             )
             updated_angles = self.line_angle_offsets[active] + angle_delta[active]
-            self.line_angle_offsets[active] = updated_angles.clamp(
-                -self._max_angle_offset, self._max_angle_offset
-            )
-
-        stop_values = actions[:, -1]
-        stop_threshold = self.config.stop_action_threshold
-        stop_mask = (stop_values > stop_threshold) & active
+            self.line_angle_offsets[active] = updated_angles
 
         self.step_count = self.step_count + active.long()
         timeout_mask = (self.step_count >= self.config.max_steps) & active
@@ -158,8 +151,18 @@ class PolygonLocalizationEnv:
         normals = self._compute_normals()
         poly_masks = self._rasterize_polytope(normals, self.line_distances)
         current_iou = self._calculate_iou_from_masks(poly_masks)
+        if self.last_iou is None:
+            raise RuntimeError("last_iou not initialised.")
+        delta_iou = current_iou - self.last_iou
+        stop_delta = torch.tensor(
+            self.config.auto_stop_iou_delta,
+            dtype=current_iou.dtype,
+            device=current_iou.device,
+        )
+        stop_mask = (delta_iou.abs() <= stop_delta) & active
         rewards, success_mask = self._compute_rewards(
             current_iou=current_iou,
+            delta_iou=delta_iou,
             active_mask=active,
             stop_mask=stop_mask,
         )
@@ -170,19 +173,23 @@ class PolygonLocalizationEnv:
 
         self.vertices = self._compute_vertices(normals, self.line_distances)
         next_state = self._polygon_state()
-        info = {"iou": current_iou.detach(), "success": success_mask.detach()}
+        info = {
+            "iou": current_iou.detach(),
+            "success": success_mask.detach(),
+            "delta_iou": delta_iou.detach(),
+            "auto_stop": stop_mask.detach(),
+        }
         return next_state, rewards.detach(), done.detach(), info
 
     def _compute_rewards(
         self,
         current_iou: torch.Tensor,
+        delta_iou: torch.Tensor,
         active_mask: torch.Tensor,
         stop_mask: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.last_iou is None or self.has_tumor is None:
             raise RuntimeError("Environment must be reset before computing rewards.")
-
-        delta_iou = current_iou - self.last_iou
         rewards = torch.where(active_mask, delta_iou, torch.zeros_like(delta_iou))
 
         tumor_active = self.has_tumor & active_mask
@@ -221,10 +228,8 @@ class PolygonLocalizationEnv:
     def _polygon_state(self) -> torch.Tensor:
         if self.line_angle_offsets is None or self.line_distances is None:
             raise RuntimeError("Environment not initialised.")
-        total_angles = self._base_angles.unsqueeze(0) + self.line_angle_offsets
-        cos_vals = torch.cos(total_angles)
-        sin_vals = torch.sin(total_angles)
-        return torch.cat([cos_vals, sin_vals, self.line_distances], dim=-1)
+        angle_degrees = torch.rad2deg(self.line_angle_offsets)
+        return torch.cat([self.line_distances, angle_degrees], dim=-1)
 
     def _grid_offsets(self, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
         if self._grid_offset_x is None or self._grid_offset_y is None:
@@ -254,23 +259,89 @@ class PolygonLocalizationEnv:
         return torch.where(union > 0, intersection / union, torch.zeros_like(union))
 
     def _compute_vertices(self, normals: torch.Tensor, distances: torch.Tensor) -> torch.Tensor:
-        if self.center is None:
+        if self.center is None or self.width is None or self.height is None:
             raise RuntimeError("Environment not initialised.")
-        n1 = normals
-        n2 = torch.roll(normals, shifts=-1, dims=1)
-        d1 = distances
-        d2 = torch.roll(distances, shifts=-1, dims=1)
 
-        det = n1[..., 0] * n2[..., 1] - n1[..., 1] * n2[..., 0]
-        det = torch.where(det.abs() < 1e-6, torch.full_like(det, 1e-6), det)
+        device = normals.device
+        batch_size, num_lines, _ = normals.shape
 
-        sx = (d1 * n2[..., 1] - n1[..., 1] * d2) / det
-        sy = (n1[..., 0] * d2 - d1 * n2[..., 0]) / det
-        vertices = torch.stack([sx, sy], dim=-1) + self.center.view(1, 1, 2)
+        image_rect = torch.tensor(
+            [
+                [0.0, 0.0],
+                [float(self.width - 1), 0.0],
+                [float(self.width - 1), float(self.height - 1)],
+                [0.0, float(self.height - 1)],
+            ],
+            dtype=torch.float32,
+            device=device,
+        )
+        center = self.center.to(device)
 
-        vertices[..., 0].clamp_(0.0, float(self.width - 1))
-        vertices[..., 1].clamp_(0.0, float(self.height - 1))
-        return vertices
+        polygons: list[torch.Tensor] = []
+        max_vertex_count = 0
+        eps = 1e-6
+
+        for b in range(batch_size):
+            poly = image_rect.clone()
+            for i in range(num_lines):
+                normal = normals[b, i]
+                distance = distances[b, i]
+                threshold = distance + torch.dot(normal, center)
+
+                if poly.numel() == 0:
+                    break
+
+                new_vertices: list[torch.Tensor] = []
+                prev_vertex = poly[-1]
+                prev_inside = torch.dot(normal, prev_vertex) <= (threshold + eps)
+
+                for curr_vertex in poly:
+                    curr_inside = torch.dot(normal, curr_vertex) <= (threshold + eps)
+                    if curr_inside != prev_inside:
+                        direction = curr_vertex - prev_vertex
+                        denom = torch.dot(normal, direction)
+                        if abs(float(denom)) > eps:
+                            t = (threshold - torch.dot(normal, prev_vertex)) / denom
+                            t = torch.clamp(t, 0.0, 1.0)
+                            intersection = prev_vertex + t * direction
+                            new_vertices.append(intersection)
+                    if curr_inside:
+                        new_vertices.append(curr_vertex)
+                    prev_vertex = curr_vertex
+                    prev_inside = curr_inside
+
+                if not new_vertices:
+                    poly = torch.empty(0, 2, dtype=torch.float32, device=device)
+                    break
+                poly = torch.stack(new_vertices, dim=0)
+
+            if poly.numel() > 0:
+                poly[:, 0].clamp_(0.0, float(self.width - 1))
+                poly[:, 1].clamp_(0.0, float(self.height - 1))
+            else:
+                base = center.to(dtype=torch.float32)
+                jitter_x = torch.tensor([1e-3, 0.0], device=device, dtype=torch.float32)
+                jitter_y = torch.tensor([0.0, 1e-3], device=device, dtype=torch.float32)
+                poly = torch.stack(
+                    [
+                        base,
+                        base + jitter_x,
+                        base + jitter_y,
+                    ],
+                    dim=0,
+                )
+
+            polygons.append(poly)
+            max_vertex_count = max(max_vertex_count, poly.size(0))
+
+        padded_polys: list[torch.Tensor] = []
+        for poly in polygons:
+            if poly.size(0) < max_vertex_count:
+                pad = poly[-1].unsqueeze(0).expand(max_vertex_count - poly.size(0), 2)
+                poly = torch.cat([poly, pad], dim=0)
+            padded_polys.append(poly)
+
+        return torch.stack(padded_polys, dim=0)
 
     def render(self, index: int = 0, mode: str = "rgb_array"):
         if self.images is None or self.vertices is None:
@@ -292,14 +363,16 @@ class PolygonLocalizationEnv:
             mask = self.masks[index].detach().cpu().squeeze(0).numpy()
             ax.imshow(mask, cmap="Reds", alpha=0.25)
 
-        polygon = patches.Polygon(
-            self.vertices[index].detach().cpu().numpy(),
-            closed=True,
-            fill=False,
-            edgecolor="cyan",
-            linewidth=2.0,
-        )
-        ax.add_patch(polygon)
+        verts = self.vertices[index].detach().cpu().numpy()
+        if verts.shape[0] >= 3:
+            polygon = patches.Polygon(
+                verts,
+                closed=True,
+                fill=False,
+                edgecolor="cyan",
+                linewidth=2.0,
+            )
+            ax.add_patch(polygon)
         ax.axis("off")
         fig.tight_layout(pad=0)
 

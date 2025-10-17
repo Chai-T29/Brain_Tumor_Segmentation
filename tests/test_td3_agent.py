@@ -87,7 +87,7 @@ def test_warmup_keeps_sigma_constant():
         embedding_noise_std=0.0,
         embedding_projected_dim=2,
     )
-    agent = TD3Agent(embedding_shape=(1, 1, 2), polygon_dim=2, action_dim=1, config=config)
+    agent = TD3Agent(embedding_shape=(1, 3, 3), polygon_dim=2, action_dim=1, config=config)
     agent.set_warmup_steps(20)
 
     agent._interaction_count = 0

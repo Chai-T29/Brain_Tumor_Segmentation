@@ -13,14 +13,14 @@ def _build_env(**overrides):
         line_distance_step_scale=2.0,
         line_angle_step_scale_deg=5.0,
         line_max_angle_offset_deg=45.0,
-        line_min_distance=1.0,
+        line_min_distance=0.0,
         line_max_distance_margin=1.0,
-        stop_action_threshold=0.0,
         reward_success=3.0,
         reward_no_tumor=2.0,
         reward_false_stop=-1.0,
         time_penalty=0.0,
         hold_penalty=0.0,
+        auto_stop_iou_delta=0.01,
     )
     for key, value in overrides.items():
         setattr(cfg, key, value)
@@ -35,33 +35,33 @@ def test_reset_returns_expected_shape():
     assert state.shape == (2, env.state_dim)
 
 
-def test_stop_action_success_reward():
-    env = _build_env(iou_low_threshold=0.0, iou_high_threshold=0.0, stop_action_threshold=-0.5)
+def test_auto_stop_success_reward():
+    env = _build_env(iou_low_threshold=0.0, iou_high_threshold=0.0)
     images = torch.zeros(1, 1, 32, 32)
     masks = torch.zeros(1, 1, 32, 32)
     masks[:, :, 10:22, 10:22] = 1.0
     env.reset(images, masks)
 
     actions = torch.zeros(1, env.action_dim)
-    actions[:, -1] = 1.0  # stop immediately
     _, reward, done, info = env.step(actions)
 
     assert done.item() is True
+    assert info["auto_stop"].item() is True
     assert info["success"].item() is True
     assert torch.isclose(reward, torch.tensor(env.config.reward_success)).all()
 
 
-def test_no_tumor_stop_reward_matches_config():
-    env = _build_env(stop_action_threshold=-0.5)
+def test_auto_stop_no_tumor_reward_matches_config():
+    env = _build_env()
     images = torch.zeros(1, 1, 32, 32)
     masks = torch.zeros(1, 1, 32, 32)
     env.reset(images, masks)
 
     actions = torch.zeros(1, env.action_dim)
-    actions[:, -1] = 1.0
     _, reward, done, info = env.step(actions)
 
     assert done.item() is True
+    assert info["auto_stop"].item() is True
     assert info["success"].item() is False
     assert torch.isclose(reward, torch.tensor(env.config.reward_no_tumor)).all()
 
@@ -73,7 +73,7 @@ def test_actions_keep_vertices_within_bounds():
     env.reset(images, masks)
 
     actions = torch.zeros(1, env.action_dim)
-    actions[:, :-1] = 1.0  # push outward aggressively
+    actions[:] = 1.0  # push outward aggressively
     state, _, _, _ = env.step(actions)
 
     vertices = env.vertices

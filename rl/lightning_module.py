@@ -153,7 +153,6 @@ class TD3Lightning(pl.LightningModule):
         action_norm_total = 0.0
         distance_norm_total = 0.0
         angle_norm_total = 0.0
-        stop_abs_total = 0.0
         action_measure_count = 0
 
         def _maybe_run_updates() -> None:
@@ -190,11 +189,10 @@ class TD3Lightning(pl.LightningModule):
 
             action_norm_total += float(actions.norm(dim=-1).sum().item())
             action_measure_count += actions.size(0)
-            if actions.size(1) > 1:
-                line_actions = actions[:, :-1].view(batch_size, self.environment.num_lines, 2)
+            if actions.size(1) > 0:
+                line_actions = actions.view(batch_size, self.environment.num_lines, 2)
                 distance_norm_total += float(torch.linalg.norm(line_actions[..., 0], dim=-1).sum().item())
                 angle_norm_total += float(torch.linalg.norm(line_actions[..., 1], dim=-1).sum().item())
-            stop_abs_total += float(actions[:, -1].abs().sum().item())
 
             alive_before = alive_mask.clone()
             next_polygon_cpu, reward_cpu, done_cpu, info = self.environment.step(actions_cpu)
@@ -278,7 +276,6 @@ class TD3Lightning(pl.LightningModule):
             "train/action_norm": action_norm_total / norm_count,
             "train/distance_norm": distance_norm_total / norm_count,
             "train/angle_norm": angle_norm_total / norm_count,
-            "train/stop_abs": stop_abs_total / norm_count,
         }
 
         mean_critic_loss = (
