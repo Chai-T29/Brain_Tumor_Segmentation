@@ -1,4 +1,5 @@
 seed: 42
+verbose: false
 
 data:
   data_dir: "MU-Glioma-Post/"
@@ -28,6 +29,7 @@ environment:
   line_max_angle_offset_deg: 45.0
   line_min_distance: 0.0
   line_max_distance_margin: 1.0
+  center_step_scale: 3.0
   reward_success: 4.0
   reward_no_tumor: 2.0
   reward_false_stop: -3.0

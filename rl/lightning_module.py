@@ -36,6 +36,7 @@ class TD3Lightning(pl.LightningModule):
         training_cfg: Dict,
         replay_capacity: int,
         logging_cfg: Optional[Dict] = None,
+        verbose: bool = False,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -60,6 +61,7 @@ class TD3Lightning(pl.LightningModule):
         self.algo_config = TD3Config(**algo_cfg)
         self.training_config = TrainingConfig(**training_cfg)
         self.logging_cfg = logging_cfg or {}
+        self.verbose = bool(verbose)
         self.test_gif_limit = int(self.logging_cfg.get("test_gif_limit", 10))
         self.test_gif_fps = int(self.logging_cfg.get("test_gif_fps", 4))
         gif_dir = self.logging_cfg.get("test_gif_dir", "lightning_logs/test_gifs")
@@ -139,6 +141,20 @@ class TD3Lightning(pl.LightningModule):
         polygon_state_cpu = self.environment.reset(images.cpu(), masks.cpu())
         polygon_state = polygon_state_cpu.to(self.device)
 
+        avg_gt_iou: float | None = None
+        if self.verbose and target_polygon_cpu is not None:
+            gt_iou_tensor = self._compute_target_iou(target_polygon_cpu)
+            if gt_iou_tensor is not None:
+                avg_gt_iou = float(gt_iou_tensor.mean().item())
+
+        if self.verbose:
+            start_msg = (
+                f"[Verbose][Train] epoch={self.current_epoch} batch={batch_idx} start -- batch_size={batch_size}"
+            )
+            if avg_gt_iou is not None:
+                start_msg += f" gt_iou={avg_gt_iou:.4f}"
+            print(start_msg)
+
         accumulator = NStepAccumulator(
             n_step=self.algo_config.n_step,
             gamma=self.algo_config.gamma,
@@ -212,6 +228,7 @@ class TD3Lightning(pl.LightningModule):
                 embeddings[active_indices],
                 polygon_state[active_indices],
                 deterministic=False,
+                apply_embedding_noise=False if self.agent.config.true_guided_exploration else True,
                 guided_targets=guided_subset,
             )
             actions[active_indices] = chosen_actions
@@ -226,6 +243,18 @@ class TD3Lightning(pl.LightningModule):
 
             alive_before = alive_mask.clone()
             next_polygon_cpu, reward_cpu, done_cpu, info = self.environment.step(actions_cpu)
+
+            if self.verbose:
+                avg_iou_val = float(info["iou"].mean().item())
+                avg_delta_val = float(info["delta_iou"].mean().item())
+                avg_reward_val = float(reward_cpu.mean().item())
+                log_msg = (
+                    f"[Verbose][Train] epoch={self.current_epoch} batch={batch_idx} step={batch_steps_completed} "
+                    f"avg_iou={avg_iou_val:.4f} delta_iou={avg_delta_val:.4f} reward={avg_reward_val:.4f}"
+                )
+                if avg_gt_iou is not None:
+                    log_msg += f" gt_iou={avg_gt_iou:.4f}"
+                print(log_msg)
 
             reward = reward_cpu.to(self.device)
             done_bool = done_cpu.to(torch.bool)
@@ -335,6 +364,15 @@ class TD3Lightning(pl.LightningModule):
 
         self.log_dict(norm_metrics, on_step=False, on_epoch=True, prog_bar=False, sync_dist=False)
 
+        if self.verbose:
+            final_iou_mean = float(final_iou.mean().detach().cpu().item())
+            end_msg = (
+                f"[Verbose][Train] epoch={self.current_epoch} batch={batch_idx} complete -- final_iou={final_iou_mean:.4f}"
+            )
+            if avg_gt_iou is not None:
+                end_msg += f" gt_iou={avg_gt_iou:.4f}"
+            print(end_msg)
+
         return torch.tensor(mean_critic_loss, device=self.device)
 
     @staticmethod
@@ -356,31 +394,44 @@ class TD3Lightning(pl.LightningModule):
             target_state = target_state.to(device)
 
         num_lines = self.environment.num_lines
-        if current_state.size(-1) < num_lines * 2 or target_state.size(-1) < num_lines * 2:
+        if current_state.size(-1) < num_lines * 2 + 2 or target_state.size(-1) < num_lines * 2 + 2:
             raise ValueError("Current/target polygon state does not match expected dimensions.")
 
         distance_scale = max(1e-6, float(self.env_config.line_distance_step_scale))
         angle_step_rad = max(1e-6, math.radians(self.env_config.line_angle_step_scale_deg))
+        center_step_scale = max(1e-6, float(self.env_config.center_step_scale))
 
         current_dist = current_state[:, :num_lines]
-        current_angle = current_state[:, num_lines:]
+        current_angle = current_state[:, num_lines : 2 * num_lines]
+        current_center = current_state[:, 2 * num_lines : 2 * num_lines + 2]
 
         target_dist = target_state[:, :num_lines]
-        target_angle = target_state[:, num_lines:]
+        target_angle = target_state[:, num_lines : 2 * num_lines]
+        target_center = target_state[:, 2 * num_lines : 2 * num_lines + 2]
 
         dist_diff = target_dist - current_dist
         angle_diff_deg = self._wrap_degrees(target_angle - current_angle)
+        center_diff = target_center - current_center
 
         distance_actions = torch.clamp(dist_diff / distance_scale, min=-1.0, max=1.0)
         angle_diff_rad = torch.deg2rad(angle_diff_deg)
         angle_actions = torch.clamp(angle_diff_rad / angle_step_rad, min=-1.0, max=1.0)
+
+        diff_x = center_diff[:, 0]
+        diff_y = center_diff[:, 1]
+        up_action = torch.clamp(-diff_y / center_step_scale, min=0.0, max=1.0)
+        down_action = torch.clamp(diff_y / center_step_scale, min=0.0, max=1.0)
+        left_action = torch.clamp(-diff_x / center_step_scale, min=0.0, max=1.0)
+        right_action = torch.clamp(diff_x / center_step_scale, min=0.0, max=1.0)
+        center_actions = torch.stack([up_action, down_action, left_action, right_action], dim=1)
 
         distance_threshold = distance_scale
         angle_threshold = float(self.env_config.line_angle_step_scale_deg)
 
         dist_close = (dist_diff.abs() <= distance_threshold).all(dim=1)
         angle_close = (angle_diff_deg.abs() <= angle_threshold).all(dim=1)
-        close_enough = dist_close & angle_close
+        center_close = (center_diff.abs() <= center_step_scale).all(dim=1)
+        close_enough = dist_close & angle_close & center_close
 
         stop_tensor = torch.full(
             (current_state.size(0), 1),
@@ -400,12 +451,66 @@ class TD3Lightning(pl.LightningModule):
             stop_tensor,
         )
 
-        guided_full = torch.cat([distance_actions, angle_actions, stop_tensor], dim=1)
+        line_actions = torch.stack([distance_actions, angle_actions], dim=-1).reshape(current_state.size(0), num_lines * 2)
+        guided_full = torch.cat([line_actions, center_actions, stop_tensor], dim=1)
         return guided_full.clamp(-1.0, 1.0)
+
+    def _compute_target_iou(self, target_state: torch.Tensor | None) -> torch.Tensor | None:
+        """Return IoU achieved by the provided target polygon state."""
+        if target_state is None:
+            return None
+
+        env = self.environment
+        if env.line_distances is None or env.line_angle_offsets is None:
+            return None
+
+        num_lines = env.num_lines
+        device = env.line_distances.device
+        dtype = env.line_distances.dtype
+
+        target_state = target_state.to(device=device, dtype=dtype)
+
+        saved_distances = env.line_distances.clone()
+        saved_angles = env.line_angle_offsets.clone()
+        saved_offsets = env.center_offsets.clone() if env.center_offsets is not None else None
+        saved_positions = env.center_positions.clone() if env.center_positions is not None else None
+        saved_vertices = env.vertices.clone() if env.vertices is not None else None
+        saved_last_iou = env.last_iou.clone() if env.last_iou is not None else None
+
+        env.line_distances.copy_(target_state[:, :num_lines])
+        env.line_angle_offsets.copy_(torch.deg2rad(target_state[:, num_lines : 2 * num_lines]))
+
+        if env.center_offsets is not None:
+            env.center_offsets.copy_(target_state[:, 2 * num_lines : 2 * num_lines + 2])
+            if env.base_center is not None:
+                env.center_positions = env.base_center.unsqueeze(0) + env.center_offsets
+
+        normals = env._compute_normals()
+        poly_masks = env._rasterize_polytope(normals, env.line_distances)
+        iou = env._calculate_iou_from_masks(poly_masks)
+
+        env.line_distances.copy_(saved_distances)
+        env.line_angle_offsets.copy_(saved_angles)
+        if saved_offsets is not None and env.center_offsets is not None:
+            env.center_offsets.copy_(saved_offsets)
+        if saved_positions is not None:
+            env.center_positions = saved_positions
+        else:
+            env.center_positions = None
+        env.vertices = saved_vertices
+        env.last_iou = saved_last_iou
+
+        return iou
 
     def validation_step(self, batch, batch_idx: int):
         metrics, _ = self._simulate_environment(self.val_env, batch, deterministic=True, record=False)
         self._log_metrics(metrics, prefix="val")
+        if self.verbose:
+            mean_iou = float(metrics["mean_iou"].detach().cpu().item())
+            avg_reward = float(metrics["avg_reward"].detach().cpu().item())
+            print(
+                f"[Verbose][Val] epoch={self.current_epoch} batch={batch_idx} avg_reward={avg_reward:.4f} mean_iou={mean_iou:.4f}"
+            )
         return metrics
 
     def on_test_epoch_start(self) -> None:
@@ -418,6 +523,12 @@ class TD3Lightning(pl.LightningModule):
         metrics, frames = self._simulate_environment(self.test_env, batch, deterministic=True, record=record)
         self._log_metrics(metrics, prefix="test")
         self._test_epoch_outputs.append(metrics)
+        if self.verbose:
+            mean_iou = float(metrics["mean_iou"].detach().cpu().item())
+            avg_reward = float(metrics["avg_reward"].detach().cpu().item())
+            print(
+                f"[Verbose][Test] batch={batch_idx} avg_reward={avg_reward:.4f} mean_iou={mean_iou:.4f}"
+            )
 
         if record and frames:
             reward_value = metrics["avg_reward"].detach().cpu().item()

@@ -69,6 +69,7 @@ def _seed_everything(seed: int) -> None:
 def main() -> None:
     config = load_config("config.yaml")
     seed = config.get("seed", 42)
+    verbose = bool(config.get("verbose", False))
     _seed_everything(seed)
 
     data_cfg = config.get("data", {})
@@ -78,6 +79,8 @@ def main() -> None:
     training_cfg = config.get("training", {})
     logging_cfg = config.get("logging", {})
 
+    if verbose:
+        print("[Verbose] Initialising data module...")
     data_module = BrainTumorDataModule(
         data_dir=data_cfg.get("data_dir", "MU-Glioma-Post/"),
         batch_size=data_cfg.get("batch_size", 16),
@@ -99,6 +102,9 @@ def main() -> None:
     if data_module.embedding_shape is None:
         raise RuntimeError("Failed to prepare embedding memmaps; embedding_shape is undefined.")
 
+    if verbose:
+        print("[Verbose] Data module ready. Building model...")
+
     replay_capacity = int(algo_cfg.pop("replay_capacity", 200000))
 
     model = TD3Lightning(
@@ -108,7 +114,11 @@ def main() -> None:
         training_cfg=training_cfg,
         replay_capacity=replay_capacity,
         logging_cfg=logging_cfg,
+        verbose=verbose,
     )
+
+    if verbose:
+        print("[Verbose] Configuring trainer...")
 
     logger = TensorBoardLogger(
         save_dir=logging_cfg.get("log_dir", "lightning_logs"),
@@ -141,6 +151,9 @@ def main() -> None:
         simple_ckpt,
     ]
 
+    if verbose:
+        print("[Verbose] Starting training loop...")
+
     trainer = pl.Trainer(
         accelerator="auto",
         devices="auto",
@@ -156,6 +169,9 @@ def main() -> None:
     )
 
     trainer.fit(model, datamodule=data_module)
+
+    if verbose:
+        print("[Verbose] Training completed.")
 
 
 if __name__ == "__main__":

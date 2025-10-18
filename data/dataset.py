@@ -178,22 +178,28 @@ class BrainTumorDataset(Dataset):
         if num_lines <= 0:
             raise ValueError("Environment configuration must define a positive number of sides.")
 
+        height, width = mask_slice.shape
+        base_center = np.array([(width - 1) / 2.0, (height - 1) / 2.0], dtype=np.float32)
         mask_binary = mask_slice > 0.5
         if not np.any(mask_binary):
             distances = np.full(num_lines, env_cfg.line_min_distance, dtype=np.float32)
             offsets = np.zeros(num_lines, dtype=np.float32)
-            return np.concatenate([distances, offsets]).astype(np.float32)
+            center_offset = np.zeros(2, dtype=np.float32)
+            return np.concatenate([distances, offsets, center_offset]).astype(np.float32)
 
         coords_y, coords_x = np.nonzero(mask_binary)
         points = np.stack([coords_x.astype(np.float32), coords_y.astype(np.float32)], axis=1)
+        mask_center = points.mean(axis=0)
 
         hull = self._convex_hull(points)
         if hull.shape[0] < 3:
             hull = points
 
-        height, width = mask_slice.shape
-        center = np.array([(width - 1) / 2.0, (height - 1) / 2.0], dtype=np.float32)
-        relative_points = hull - center
+        relative_points = hull - mask_center
+        center_offset = mask_center - base_center
+        offset_min = np.array([-base_center[0], -base_center[1]], dtype=np.float32)
+        offset_max = np.array([(width - 1) - base_center[0], (height - 1) - base_center[1]], dtype=np.float32)
+        center_offset = np.clip(center_offset, offset_min, offset_max)
 
         max_distance = min(width, height) / 2.0 - float(env_cfg.line_max_distance_margin)
         max_distance = max(max_distance, float(env_cfg.line_min_distance) + 1.0)
@@ -229,7 +235,7 @@ class BrainTumorDataset(Dataset):
             offset_rad = float(np.clip(offset_rad, -max_offset_rad, max_offset_rad))
             offsets_deg[idx] = math.degrees(offset_rad)
 
-        return np.concatenate([distances, offsets_deg]).astype(np.float32)
+        return np.concatenate([distances, offsets_deg, center_offset]).astype(np.float32)
 
     @staticmethod
     def _convex_hull(points: np.ndarray) -> np.ndarray:

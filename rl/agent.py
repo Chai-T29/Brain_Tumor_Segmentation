@@ -213,34 +213,7 @@ class TD3Agent(nn.Module):
             self.critic.eval()
         emb = self._augment_embedding(embedding) if apply_embedding_noise else embedding
         action = self.actor(emb, polygon_state)
-
-        if self.config.true_guided_exploration and guided_targets is not None:
-            guidance_scale = float(self.config.guidance_scale)
-            if guidance_scale > 0.0:
-                tgt = guided_targets
-                total_dims = action.size(-1)
-                guided_dims = tgt.size(-1)
-                main_dims = max(0, total_dims - 1)
-
-                updated_action = action.clone()
-
-                if guided_dims > 0 and main_dims > 0:
-                    blend_main = min(main_dims, guided_dims)
-                    updated_action[..., :blend_main] = torch.lerp(
-                        updated_action[..., :blend_main],
-                        tgt[..., :blend_main],
-                        guidance_scale,
-                    )
-
-                if guided_dims >= total_dims:
-                    stop_target = tgt[..., total_dims - 1]
-                    updated_action[..., total_dims - 1] = torch.lerp(
-                        updated_action[..., total_dims - 1],
-                        stop_target,
-                        guidance_scale,
-                    )
-
-                action = updated_action
+        base_action = action.clone()
 
         if not deterministic:
             sigma = self._current_exploration_sigma()
@@ -251,6 +224,13 @@ class TD3Agent(nn.Module):
                     noisy_action = self._guided_exploration_adjust(emb, polygon_state, noisy_action, sigma)
                 action = noisy_action
             self._interaction_count += embedding.size(0)
+        # Apply mathematically derived guidance update after noise
+        if self.config.true_guided_exploration and guided_targets is not None:
+            guidance_scale = float(self.config.guidance_scale)
+            if guidance_scale > 0.0:
+                tgt = guided_targets.clamp(-1.0, 1.0)
+                diff = tgt - base_action
+                action = (action + guidance_scale * diff).clamp(-1.0, 1.0)
         return action.clamp_(-1.0, 1.0)
 
     def update(self, batch: Dict[str, torch.Tensor], weights: Optional[torch.Tensor] = None) -> Dict[str, float | torch.Tensor]:

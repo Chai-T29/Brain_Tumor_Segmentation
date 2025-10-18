@@ -30,6 +30,7 @@ class EnvironmentConfig:
     line_max_angle_offset_deg: float = 45.0
     line_min_distance: float = 0.0
     line_max_distance_margin: float = 1.0
+    center_step_scale: float = 2.0
 
 
 class PolygonLocalizationEnv:
@@ -41,8 +42,9 @@ class PolygonLocalizationEnv:
         self.config = config
         self.num_lines = int(config.num_sides)
         self.line_action_dim = self.num_lines * 2  # distance Δ, angle Δ
-        self.action_dim = self.line_action_dim + 1  # + stop score
-        self.state_dim = self.num_lines * 2   # distances, angle offsets (degrees)
+        self.center_action_dim = 4  # up, down, left, right adjustments for center
+        self.action_dim = self.line_action_dim + self.center_action_dim + 1  # + stop score
+        self.state_dim = self.num_lines * 2 + 2  # distances, angle offsets (degrees), center offsets
 
         base_angles = torch.linspace(
             0.0, 2 * math.pi, steps=self.num_lines + 1, dtype=torch.float32
@@ -63,10 +65,12 @@ class PolygonLocalizationEnv:
 
         self.height: int | None = None
         self.width: int | None = None
-        self.center: torch.Tensor | None = None
-        self._grid_offset_x: torch.Tensor | None = None
-        self._grid_offset_y: torch.Tensor | None = None
-        self._grid_axes_cache: Dict[torch.device, Tuple[torch.Tensor, torch.Tensor]] = {}
+        self.base_center: torch.Tensor | None = None
+        self.center_offsets: torch.Tensor | None = None
+        self.center_positions: torch.Tensor | None = None
+        self._pixel_coord_cache: Dict[torch.device, Tuple[torch.Tensor, torch.Tensor]] = {}
+        self._center_offset_min: torch.Tensor | None = None
+        self._center_offset_max: torch.Tensor | None = None
         self._max_distance: float = 0.0
 
     def reset(self, images: torch.Tensor, masks: torch.Tensor) -> torch.Tensor:
@@ -82,14 +86,21 @@ class PolygonLocalizationEnv:
         self.masks = masks.clone()
         self.height = int(height)
         self.width = int(width)
-        self.center = torch.tensor(
+        base_center = torch.tensor(
             [(self.width - 1) / 2.0, (self.height - 1) / 2.0], dtype=torch.float32
         )
-        xs = torch.arange(self.width, dtype=torch.float32)
-        ys = torch.arange(self.height, dtype=torch.float32)
-        self._grid_offset_x = (xs - self.center[0]).view(1, self.width)
-        self._grid_offset_y = (ys - self.center[1]).view(self.height, 1)
-        self._grid_axes_cache.clear()
+        self.base_center = base_center
+        self.center_offsets = torch.zeros((batch_size, 2), dtype=torch.float32)
+        self.center_positions = base_center.unsqueeze(0).repeat(batch_size, 1)
+
+        self._center_offset_min = torch.tensor(
+            [-base_center[0], -base_center[1]], dtype=torch.float32
+        )
+        self._center_offset_max = torch.tensor(
+            [(self.width - 1) - base_center[0], (self.height - 1) - base_center[1]], dtype=torch.float32
+        )
+
+        self._pixel_coord_cache.clear()
 
         self.has_tumor = (masks.view(batch_size, -1).sum(dim=1) > 0).to(torch.bool)
         self._max_distance = float(min(self.width, self.height) / 2.0 - self.config.line_max_distance_margin)
@@ -135,10 +146,14 @@ class PolygonLocalizationEnv:
 
         active = self.active_mask.clone()
         line_flat = actions[..., : self.line_action_dim]
-        stop_scores = actions[..., -1]
+        center_start = self.line_action_dim
+        center_end = center_start + self.center_action_dim
+        center_flat = actions[..., center_start:center_end]
+        stop_scores = actions[..., center_end]
         manual_stop = (stop_scores > 0.0) & active
 
         line_components = line_flat.view(batch_size, self.num_lines, 2)
+        center_components = center_flat
         update_mask = active & (~manual_stop)
         if update_mask.any():
             distance_delta = line_components[..., 0] * self.config.line_distance_step_scale
@@ -150,8 +165,38 @@ class PolygonLocalizationEnv:
             updated_angles = self.line_angle_offsets[update_mask] + angle_delta[update_mask]
             self.line_angle_offsets[update_mask] = updated_angles
 
+            if self.center_offsets is None or self.center_positions is None:
+                raise RuntimeError("Center offsets not initialised.")
+
+            center_active = center_components[update_mask]
+            up = torch.relu(center_active[..., 0])
+            down = torch.relu(center_active[..., 1])
+            left = torch.relu(center_active[..., 2])
+            right = torch.relu(center_active[..., 3])
+
+            delta_y = (down - up) * self.config.center_step_scale
+            delta_x = (right - left) * self.config.center_step_scale
+            delta_center = torch.stack([delta_x, delta_y], dim=-1)
+
+            offsets = self.center_offsets[update_mask] + delta_center
+            if self._center_offset_min is None or self._center_offset_max is None:
+                raise RuntimeError("Center offset bounds not initialised.")
+            min_bounds = self._center_offset_min.to(offsets.device)
+            max_bounds = self._center_offset_max.to(offsets.device)
+            offsets = torch.maximum(offsets, min_bounds.unsqueeze(0))
+            offsets = torch.minimum(offsets, max_bounds.unsqueeze(0))
+
+            self.center_offsets[update_mask] = offsets
+
         self.step_count = self.step_count + active.long()
         timeout_mask = (self.step_count >= self.config.max_steps) & active
+
+        if self.center_offsets is None:
+            raise RuntimeError("Center offsets not initialised.")
+        if self.base_center is None:
+            raise RuntimeError("Base center not initialised.")
+        base_center = self.base_center.to(self.center_offsets.device)
+        self.center_positions = base_center.unsqueeze(0) + self.center_offsets
 
         normals = self._compute_normals()
         poly_masks = self._rasterize_polytope(normals, self.line_distances)
@@ -226,27 +271,35 @@ class PolygonLocalizationEnv:
         return torch.stack([cos_vals, sin_vals], dim=-1)
 
     def _polygon_state(self) -> torch.Tensor:
-        if self.line_angle_offsets is None or self.line_distances is None:
+        if (
+            self.line_angle_offsets is None
+            or self.line_distances is None
+            or self.center_offsets is None
+        ):
             raise RuntimeError("Environment not initialised.")
         angle_degrees = torch.rad2deg(self.line_angle_offsets)
-        return torch.cat([self.line_distances, angle_degrees], dim=-1)
+        return torch.cat([self.line_distances, angle_degrees, self.center_offsets], dim=-1)
 
-    def _grid_offsets(self, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
-        if self._grid_offset_x is None or self._grid_offset_y is None:
-            raise RuntimeError("Grid offsets not initialised.")
-        cached = self._grid_axes_cache.get(device)
+    def _pixel_coords(self, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+        cached = self._pixel_coord_cache.get(device)
         if cached is None:
-            offset_x = self._grid_offset_x.to(device=device)
-            offset_y = self._grid_offset_y.to(device=device)
-            cached = (offset_x, offset_y)
-            self._grid_axes_cache[device] = cached
+            x_coords = torch.arange(self.width, dtype=torch.float32, device=device).view(1, 1, 1, self.width)
+            y_coords = torch.arange(self.height, dtype=torch.float32, device=device).view(1, 1, self.height, 1)
+            cached = (x_coords, y_coords)
+            self._pixel_coord_cache[device] = cached
         return cached
 
     def _rasterize_polytope(self, normals: torch.Tensor, distances: torch.Tensor) -> torch.Tensor:
-        offset_x, offset_y = self._grid_offsets(normals.device)
+        pixel_x, pixel_y = self._pixel_coords(normals.device)
+        if self.center_offsets is None or self.base_center is None:
+            raise RuntimeError("Center state not initialised.")
+        center_offsets = self.center_offsets.to(normals.device)
+        base_center = self.base_center.to(normals.device)
+        center_x = (base_center[0] + center_offsets[:, 0]).view(-1, 1, 1, 1)
+        center_y = (base_center[1] + center_offsets[:, 1]).view(-1, 1, 1, 1)
         nx = normals[..., 0].unsqueeze(-1).unsqueeze(-1)
         ny = normals[..., 1].unsqueeze(-1).unsqueeze(-1)
-        proj = nx * offset_x.view(1, 1, 1, self.width) + ny * offset_y.view(1, 1, self.height, 1)
+        proj = nx * (pixel_x - center_x) + ny * (pixel_y - center_y)
         mask = proj <= distances[..., None, None]
         return mask.all(dim=1).to(torch.float32)
 
@@ -259,7 +312,7 @@ class PolygonLocalizationEnv:
         return torch.where(union > 0, intersection / union, torch.zeros_like(union))
 
     def _compute_vertices(self, normals: torch.Tensor, distances: torch.Tensor) -> torch.Tensor:
-        if self.center is None or self.width is None or self.height is None:
+        if self.base_center is None or self.center_offsets is None or self.width is None or self.height is None:
             raise RuntimeError("Environment not initialised.")
 
         device = normals.device
@@ -275,7 +328,10 @@ class PolygonLocalizationEnv:
             dtype=torch.float32,
             device=device,
         )
-        center = self.center.to(device)
+        if self.base_center is None or self.center_offsets is None:
+            raise RuntimeError("Center state not initialised.")
+        base_center_device = self.base_center.to(device)
+        center_offsets = self.center_offsets.to(device)
 
         polygons: list[torch.Tensor] = []
         max_vertex_count = 0
@@ -283,6 +339,8 @@ class PolygonLocalizationEnv:
 
         for b in range(batch_size):
             poly = image_rect.clone()
+            center = base_center_device + center_offsets[b]
+
             for i in range(num_lines):
                 normal = normals[b, i]
                 distance = distances[b, i]

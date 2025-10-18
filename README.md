@@ -5,7 +5,7 @@ This project reframes 2D brain tumor localization as a continuous-control reinfo
 ## Key Capabilities
 
 - **Frozen EfficientNet Encoder:** A pretrained EfficientNet (configurable) transforms each slice into a fixed embedding vector. Light Gaussian noise is injected into embeddings at runtime to emulate DrQ-v2 regularization without re-encoding pixels.
-- **Polygonal Environment:** The environment models a configurable `N`-sided polygon (default 32) whose alternating sides are actively controlled. Each controlled side receives three continuous commands—radial motion, rotation, and length adjustment—plus a stop signal shared across the polygon. IoU with the tumor mask is computed by rasterising the polygon, and rewards are tied to IoU deltas with the original terminal bonuses.
+- **Polygonal Environment with Dynamic Centre:** The environment models a configurable `N`-sided polygon (default 32) whose alternating supporting lines are actively controlled. Each line receives two continuous commands—radial motion and angular offset—while four additional actions translate the polygon centre (up, down, left, right) and a shared stop signal terminates the episode. IoU with the tumour mask is computed by rasterising the polygon, and rewards remain tied to IoU deltas with the original terminal bonuses. Ground-truth targets now anchor the polygon at the tumour centroid so guided rollouts track the lesion more faithfully.
 - **TD3 with n-step Targets:** Actor and twin critics share the EfficientNet embeddings and polygon state. Targets incorporate configurable n-step returns, Polyak averaging, target policy smoothing, and delayed policy updates.
 - **Flexible Data Pipeline:** A Lightning `DataModule` performs one-time memmap caching of slices **and** EfficientNet embeddings (stored under `embeddings/<model-name>/`), supports optional tumor-free slices, and returns per-sample metadata so raw images can be fetched or traced back for qualitative analysis.
 - **Config-Driven Training:** All tunable hyperparameters (encoder, environment geometry, RL algorithm, replay buffer, update cadence, logging) live in `config.yaml`, keeping experiments reproducible.
@@ -75,7 +75,8 @@ The script loads the most recent checkpoint, rolls out deterministic policies (n
 
 ## Configuration Highlights
 
-- **Polygon geometry:** `environment.num_sides` (default 32) determines control dimensionality (`(num_sides/2)*3 + 1`). Scales for radial, rotational, and length adjustments keep actions interpretable.
+- **Polygon geometry:** `environment.num_sides` (default 32) determines control dimensionality (`num_sides*2 + 4 + 1` = per-line distance/angle pairs, four centre shifts, and a stop gate). Radial and angular step sizes are governed by `line_distance_step_scale` and `line_angle_step_scale_deg`, while `center_step_scale` tunes how quickly the polygon’s origin can move.
+- **Verbose instrumentation:** Setting `verbose: true` in `config.yaml` enables stage prints (data prep, trainer setup) and per-collection step telemetry (average IoU, IoU delta, reward) to simplify debugging.
 - **n-step targets:** `algorithm.n_step` (default 3) matches the replay accumulator. Discounting uses `gamma ** n` for non-terminal transitions.
 - **Embedding noise:** Both the encoder (`encoder.embedding_noise_std`) and agent (`algorithm.embedding_noise_std`) can inject Gaussian noise, enabling DrQ-style regularisation without image augmentations.
 - **Training cadence:** `training.collect_steps_per_batch` limits how many environment steps are gathered per loader batch, while `update_every_n_steps` and `update_batch_size` govern the number of critic updates run afterwards.

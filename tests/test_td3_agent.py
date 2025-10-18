@@ -1,6 +1,7 @@
 import torch
 
 from rl.agent import TD3Agent, TD3Config, NoiseScheduleConfig
+from rl.lightning_module import TD3Lightning
 from rl.replay_buffer import ReplayBuffer, Transition
 
 
@@ -18,7 +19,7 @@ def test_td3_agent_action_bounds():
     agent = TD3Agent(
         embedding_shape=(1, 2, 2),
         polygon_dim=6,
-        action_dim=5,
+        action_dim=9,
         config=config,
         device=torch.device("cpu"),
     )
@@ -26,7 +27,7 @@ def test_td3_agent_action_bounds():
     polygon_state = torch.randn(3, 6)
 
     action = agent.act(embedding, polygon_state, deterministic=False)
-    assert action.shape == (3, 5)
+    assert action.shape == (3, 9)
     assert torch.all(action <= 1.0 + 1e-6)
     assert torch.all(action >= -1.0 - 1e-6)
 
@@ -50,7 +51,7 @@ def test_replay_buffer_sample_shapes():
         capacity=10,
         embedding_dim=4,
         polygon_dim=6,
-        action_dim=5,
+        action_dim=9,
         alpha=0.6,
         beta_start=0.4,
         beta_steps=1000,
@@ -61,7 +62,7 @@ def test_replay_buffer_sample_shapes():
         transition = Transition(
             embedding=torch.randn(4),
             polygon_state=torch.randn(6),
-            action=torch.tanh(torch.randn(5)),
+            action=torch.tanh(torch.randn(9)),
             reward=torch.tensor([0.5]),
             discount=torch.tensor([0.99]),
             next_polygon_state=torch.randn(6),
@@ -72,7 +73,7 @@ def test_replay_buffer_sample_shapes():
     batch, indices, weights = buffer.sample(batch_size=4)
     assert batch["embedding"].shape == (4, 4)
     assert batch["polygon"].shape == (4, 6)
-    assert batch["action"].shape == (4, 5)
+    assert batch["action"].shape == (4, 9)
     assert batch["reward"].shape == (4, 1)
     assert batch["discount"].shape == (4, 1)
     assert batch["next_polygon"].shape == (4, 6)
@@ -96,3 +97,46 @@ def test_warmup_keeps_sigma_constant():
     mid_sigma = agent._current_exploration_sigma()
 
     assert start_sigma == mid_sigma == config.exploration_noise.sigma_init
+
+
+def test_guidance_targets_match_action_layout():
+    env_cfg = {
+        "num_sides": 2,
+        "line_distance_step_scale": 2.0,
+        "line_angle_step_scale_deg": 10.0,
+        "center_step_scale": 1.0,
+    }
+    algo_cfg = {
+        "actor_hidden_sizes": [8],
+        "critic_hidden_sizes": [8],
+        "exploration_noise": {"sigma_init": 0.0, "sigma_final": 0.0, "steps": 1},
+        "embedding_projected_dim": 4,
+    }
+    training_cfg = {
+        "update_batch_size": 1,
+        "update_every_n_steps": 1,
+        "warmup_steps": 0,
+    }
+
+    module = TD3Lightning(
+        embedding_shape=(1, 1, 1),
+        env_cfg=env_cfg,
+        algo_cfg=algo_cfg,
+        training_cfg=training_cfg,
+        replay_capacity=4,
+    )
+
+    num_lines = module.environment.num_lines
+    current_state = torch.zeros(1, num_lines * 2 + 2)
+    target_state = current_state.clone()
+
+    distance_scale = module.env_config.line_distance_step_scale
+    angle_scale = module.env_config.line_angle_step_scale_deg
+
+    target_state[0, 0] = distance_scale
+    target_state[0, num_lines] = angle_scale
+
+    guidance = module._compute_true_guidance_targets(current_state, target_state)
+
+    expected = torch.tensor([1.0, 1.0, 0.0, 0.0], dtype=guidance.dtype)
+    assert torch.allclose(guidance[0, : num_lines * 2], expected, atol=1e-5)
