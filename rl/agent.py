@@ -217,17 +217,30 @@ class TD3Agent(nn.Module):
         if self.config.true_guided_exploration and guided_targets is not None:
             guidance_scale = float(self.config.guidance_scale)
             if guidance_scale > 0.0:
-                # Only blend the main action dimensions (exclude stop component).
                 tgt = guided_targets
-                a = action
-                total_dims = a.size(-1)
-                # Reserve last dim as stop; blend at most total_dims-1 dims.
+                total_dims = action.size(-1)
+                guided_dims = tgt.size(-1)
                 main_dims = max(0, total_dims - 1)
-                # If provided targets are shorter, blend only that many dims.
-                blend_dims = min(main_dims, tgt.size(-1))
-                if blend_dims > 0:
-                    blended = torch.lerp(a[..., :blend_dims], tgt[..., :blend_dims], guidance_scale)
-                    action = torch.cat([blended, a[..., blend_dims:]], dim=-1)
+
+                updated_action = action.clone()
+
+                if guided_dims > 0 and main_dims > 0:
+                    blend_main = min(main_dims, guided_dims)
+                    updated_action[..., :blend_main] = torch.lerp(
+                        updated_action[..., :blend_main],
+                        tgt[..., :blend_main],
+                        guidance_scale,
+                    )
+
+                if guided_dims >= total_dims:
+                    stop_target = tgt[..., total_dims - 1]
+                    updated_action[..., total_dims - 1] = torch.lerp(
+                        updated_action[..., total_dims - 1],
+                        stop_target,
+                        guidance_scale,
+                    )
+
+                action = updated_action
 
         if not deterministic:
             sigma = self._current_exploration_sigma()

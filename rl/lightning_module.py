@@ -198,7 +198,14 @@ class TD3Lightning(pl.LightningModule):
 
             guidance_targets_full = None
             if self.agent.config.true_guided_exploration and target_polygon is not None:
-                guidance_targets_full = self._compute_true_guidance_targets(polygon_state, target_polygon)
+                current_iou = None
+            if self.environment.last_iou is not None:
+                current_iou = self.environment.last_iou.detach().to(self.device, dtype=polygon_state.dtype)
+            guidance_targets_full = self._compute_true_guidance_targets(
+                polygon_state,
+                target_polygon,
+                current_iou=current_iou,
+            )
 
             guided_subset = guidance_targets_full[active_indices] if guidance_targets_full is not None else None
             chosen_actions = self.agent.act(
@@ -335,12 +342,15 @@ class TD3Lightning(pl.LightningModule):
         """Wrap degree differences to [-180, 180]."""
         return (delta + 180.0).remainder(360.0) - 180.0
 
+
+
     def _compute_true_guidance_targets(
         self,
         current_state: torch.Tensor,
         target_state: torch.Tensor,
+        current_iou: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Compute normalised main-action targets (distance/angle only), no stop guidance."""
+        """Compute normalised action targets, including stop guidance when IoU is high."""
         device = current_state.device
         if target_state.device != device:
             target_state = target_state.to(device)
@@ -370,11 +380,28 @@ class TD3Lightning(pl.LightningModule):
 
         dist_close = (dist_diff.abs() <= distance_threshold).all(dim=1)
         angle_close = (angle_diff_deg.abs() <= angle_threshold).all(dim=1)
-        should_stop = dist_close & angle_close
+        close_enough = dist_close & angle_close
 
-        # Only return the main action components (distance + angle), exclude stop.
-        guided_main = torch.cat([distance_actions, angle_actions], dim=1)
-        return guided_main.clamp(-1.0, 1.0)
+        stop_tensor = torch.full(
+            (current_state.size(0), 1),
+            -1.0,
+            device=device,
+            dtype=distance_actions.dtype,
+        )
+        stop_condition = torch.zeros(current_state.size(0), dtype=torch.bool, device=device)
+        if current_iou is not None:
+            iou_values = current_iou.detach().to(device=device, dtype=distance_actions.dtype).view(-1)
+            high_threshold = float(self.env_config.iou_high_threshold)
+            stop_condition = close_enough & (iou_values >= high_threshold)
+
+        stop_tensor = torch.where(
+            stop_condition.unsqueeze(1),
+            torch.ones_like(stop_tensor),
+            stop_tensor,
+        )
+
+        guided_full = torch.cat([distance_actions, angle_actions, stop_tensor], dim=1)
+        return guided_full.clamp(-1.0, 1.0)
 
     def validation_step(self, batch, batch_idx: int):
         metrics, _ = self._simulate_environment(self.val_env, batch, deterministic=True, record=False)
