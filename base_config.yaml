@@ -59,6 +59,13 @@ algorithm:
     initial: 0.2
     final: 0.0
     steps: 500000
+    randomize: false
+    distribution: beta
+    alpha: 5.0
+    beta: 2.0
+    blend: 0.5
+    min_scale: 0.0
+    max_scale: 1.0
   actor_hidden_sizes:
   - 512
   - 256

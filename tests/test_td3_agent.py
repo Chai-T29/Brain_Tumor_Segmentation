@@ -1,6 +1,7 @@
+import pytest
 import torch
 
-from rl.agent import TD3Agent, TD3Config, NoiseScheduleConfig
+from rl.agent import TD3Agent, TD3Config, NoiseScheduleConfig, GuidanceScheduleConfig
 from rl.lightning_module import TD3Lightning
 from rl.replay_buffer import ReplayBuffer, Transition
 
@@ -111,6 +112,43 @@ def test_warmup_keeps_sigma_constant():
     mid_sigma = agent._current_exploration_sigma()
 
     assert start_sigma == mid_sigma == config.exploration_noise.sigma_init
+
+
+
+def test_guidance_scale_randomization_beta():
+    schedule = GuidanceScheduleConfig(
+        initial=0.8,
+        final=0.2,
+        steps=100,
+        randomize=True,
+        alpha=5.0,
+        beta=2.0,
+        blend=0.5,
+    )
+    config = TD3Config(
+        guidance_schedule=schedule,
+        embedding_projected_dim=4,
+        embedding_noise_std=0.0,
+        actor_hidden_sizes=(16,),
+        critic_hidden_sizes=(16,),
+    )
+    agent = TD3Agent(
+        embedding_shape=(1, 2, 2),
+        polygon_dim=3,
+        action_dim=5,
+        config=config,
+        device=torch.device('cpu'),
+    )
+    agent._interaction_count = 50
+
+    torch.manual_seed(0)
+    randomized = agent._current_guidance_scale()
+    torch.manual_seed(0)
+    deterministic = agent._current_guidance_scale(randomize=False)
+
+    assert 0.0 <= randomized <= 1.0
+    assert deterministic == pytest.approx(0.5, abs=1e-6)
+    assert randomized > deterministic
 
 
 def test_guidance_targets_match_action_layout():

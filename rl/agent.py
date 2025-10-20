@@ -7,6 +7,7 @@ import math
 import torch
 import torch.nn as nn
 from torch import optim
+from torch.distributions import Beta as BetaDistribution
 
 from .networks import Actor, Critic
 
@@ -18,11 +19,19 @@ class NoiseScheduleConfig:
     steps: int = 500000
 
 
+
 @dataclass
 class GuidanceScheduleConfig:
     initial: float = 0.7
     final: float = 0.0
     steps: int = 500000
+    randomize: bool = False
+    distribution: str = "beta"
+    alpha: float = 5.0
+    beta: float = 2.0
+    blend: float = 0.5
+    min_scale: float = 0.0
+    max_scale: float = 1.0
 
 
 @dataclass
@@ -138,6 +147,7 @@ class TD3Agent(nn.Module):
         self.total_updates = 0
         self._interaction_count = 0
         self.warmup_steps = 0
+        self._last_guidance_scale = float(self.config.guidance_scale)
 
     def to(self, *args, **kwargs):
         module = super().to(*args, **kwargs)
@@ -225,6 +235,7 @@ class TD3Agent(nn.Module):
         base_action = action.clone()
 
         guidance_scale = self._current_guidance_scale()
+        self._last_guidance_scale = float(guidance_scale)
 
         if not deterministic:
             sigma = self._current_exploration_sigma()
@@ -316,7 +327,7 @@ class TD3Agent(nn.Module):
                         mse = (diff.pow(2) * mask_float).sum() / (supervised * actor_action.size(-1))
                         loss_weight = self.config.guided_actor_loss_weight
                         scale_factor = 1.0
-                        current_guidance = float(self._current_guidance_scale())
+                        current_guidance = float(self._current_guidance_scale(randomize=False))
                         if self.config.guided_actor_loss_scale_with_guidance:
                             scale_factor = max(0.0, 1.0 - current_guidance)
                         scaled_weight = loss_weight * scale_factor
@@ -352,6 +363,7 @@ class TD3Agent(nn.Module):
         td_errors = 0.5 * (torch.abs(td_error1.detach()) + torch.abs(td_error2.detach()))
         td_errors = td_errors.flatten()
         metrics["td_errors"] = td_errors
+        metrics["guidance_scale"] = float(self._last_guidance_scale)
 
         self.total_updates += 1
         return metrics
@@ -372,15 +384,51 @@ class TD3Agent(nn.Module):
         return float(schedule.sigma_init + (schedule.sigma_final - schedule.sigma_init) * progress)
 
 
-    def _current_guidance_scale(self) -> float:
+    def _scheduled_guidance_scale(self) -> float:
         schedule = self.config.guidance_schedule
         if schedule is not None:
             steps = max(1, int(schedule.steps))
             progress = 0.0
             if steps > 0:
                 progress = min(1.0, max(0.0, self._interaction_count / float(steps)))
-            return float(schedule.initial + (schedule.final - schedule.initial) * progress)
+            value = schedule.initial + (schedule.final - schedule.initial) * progress
+            min_scale = float(getattr(schedule, 'min_scale', 0.0))
+            max_scale = float(getattr(schedule, 'max_scale', 1.0))
+            if max_scale < min_scale:
+                min_scale, max_scale = max_scale, min_scale
+            value = float(min(max_scale, max(min_scale, value)))
+            return value
         return float(self.config.guidance_scale)
+
+    def _apply_guidance_randomization(self, scheduled: float, schedule_cfg: GuidanceScheduleConfig) -> float:
+        blend = float(getattr(schedule_cfg, 'blend', 0.5))
+        blend = max(0.0, min(1.0, blend))
+        distribution = getattr(schedule_cfg, 'distribution', 'beta')
+        distribution = str(distribution).lower()
+        if distribution == 'beta':
+            alpha = max(1e-3, float(getattr(schedule_cfg, 'alpha', 1.0)))
+            beta_param = max(1e-3, float(getattr(schedule_cfg, 'beta', 1.0)))
+            dist = BetaDistribution(torch.tensor(alpha), torch.tensor(beta_param))
+            sample = float(dist.sample().item())
+        elif distribution == 'uniform':
+            sample = float(torch.rand(1).item())
+        else:
+            sample = float(torch.rand(1).item())
+        randomized = blend * scheduled + (1.0 - blend) * sample
+        min_scale = float(getattr(schedule_cfg, 'min_scale', 0.0))
+        max_scale = float(getattr(schedule_cfg, 'max_scale', 1.0))
+        if max_scale < min_scale:
+            min_scale, max_scale = max_scale, min_scale
+        randomized = float(min(max_scale, max(min_scale, randomized)))
+        return randomized
+
+    def _current_guidance_scale(self, randomize: bool = True) -> float:
+        scheduled = float(self._scheduled_guidance_scale())
+        schedule_cfg = self.config.guidance_schedule
+        if randomize and schedule_cfg is not None and getattr(schedule_cfg, 'randomize', False):
+            randomized = self._apply_guidance_randomization(scheduled, schedule_cfg)
+            return float(max(0.0, min(1.0, randomized)))
+        return float(max(0.0, min(1.0, scheduled)))
 
     def set_warmup_steps(self, warmup_steps: int) -> None:
         self.warmup_steps = max(0, int(warmup_steps))
