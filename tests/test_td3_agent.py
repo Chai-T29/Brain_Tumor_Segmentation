@@ -19,7 +19,7 @@ def test_td3_agent_action_bounds():
     agent = TD3Agent(
         embedding_shape=(1, 2, 2),
         polygon_dim=6,
-        action_dim=9,
+        action_dim=7,
         config=config,
         device=torch.device("cpu"),
     )
@@ -27,7 +27,7 @@ def test_td3_agent_action_bounds():
     polygon_state = torch.randn(3, 6)
 
     action = agent.act(embedding, polygon_state, deterministic=False)
-    assert action.shape == (3, 9)
+    assert action.shape == (3, 7)
     assert torch.all(action <= 1.0 + 1e-6)
     assert torch.all(action >= -1.0 - 1e-6)
 
@@ -51,7 +51,7 @@ def test_replay_buffer_sample_shapes():
         capacity=10,
         embedding_dim=4,
         polygon_dim=6,
-        action_dim=9,
+        action_dim=7,
         alpha=0.6,
         beta_start=0.4,
         beta_steps=1000,
@@ -62,7 +62,7 @@ def test_replay_buffer_sample_shapes():
         transition = Transition(
             embedding=torch.randn(4),
             polygon_state=torch.randn(6),
-            action=torch.tanh(torch.randn(9)),
+            action=torch.tanh(torch.randn(7)),
             reward=torch.tensor([0.5]),
             discount=torch.tensor([0.99]),
             next_polygon_state=torch.randn(6),
@@ -73,7 +73,7 @@ def test_replay_buffer_sample_shapes():
     batch, indices, weights = buffer.sample(batch_size=4)
     assert batch["embedding"].shape == (4, 4)
     assert batch["polygon"].shape == (4, 6)
-    assert batch["action"].shape == (4, 9)
+    assert batch["action"].shape == (4, 7)
     assert batch["reward"].shape == (4, 1)
     assert batch["discount"].shape == (4, 1)
     assert batch["next_polygon"].shape == (4, 6)
@@ -138,5 +138,8 @@ def test_guidance_targets_match_action_layout():
 
     guidance = module._compute_true_guidance_targets(current_state, target_state)
 
-    expected = torch.tensor([1.0, 1.0, 0.0, 0.0], dtype=guidance.dtype)
-    assert torch.allclose(guidance[0, : num_lines * 2], expected, atol=1e-5)
+    expected_line = torch.tensor([1.0, 1.0, 0.0, 0.0], dtype=guidance.dtype)
+    assert torch.allclose(guidance[0, : num_lines * 2], expected_line, atol=1e-5)
+    expected_center = torch.zeros(2, dtype=guidance.dtype)
+    assert torch.allclose(guidance[0, num_lines * 2 : num_lines * 2 + 2], expected_center, atol=1e-5)
+    assert torch.isclose(guidance[0, -1], torch.tensor(-1.0, dtype=guidance.dtype))

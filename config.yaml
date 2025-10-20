@@ -20,14 +20,14 @@ encoder:
   embedding_noise_std: 0.01
 
 environment:
-  num_sides: 32
+  num_sides: 16
   max_steps: 60
   iou_low_threshold: 0.2
   iou_high_threshold: 0.6
   initial_radius: 90.0
-  line_distance_step_scale: 10.0
-  line_angle_step_scale_deg: 10.0
-  center_step_scale: 10.0
+  line_distance_step_scale: 5.0
+  line_angle_step_scale_deg: 5.0
+  center_step_scale: 4.0
   line_max_angle_offset_deg: 45.0
   line_min_distance: 0.0
   line_max_distance_margin: 1.0
@@ -41,15 +41,15 @@ algorithm:
   gamma: 0.99
   n_step: 3
   tau: 0.005
-  actor_lr: 0.0001
-  critic_lr: 0.0001
-  policy_delay: 2
+  actor_lr: 0.001
+  critic_lr: 0.001
+  policy_delay: 1
   exploration_noise:
-    sigma_init: 1.0
-    sigma_final: 0.1
+    sigma_init: 0.3
+    sigma_final: 0.05
     steps: 1000000
-  target_policy_noise_std: 0.2
-  target_policy_noise_clip: 0.5
+  target_policy_noise_std: 0.1
+  target_policy_noise_clip: 0.3
   max_grad_norm: 10.0
   embedding_noise_std: 0.01
   embedding_projected_dim: 1280
@@ -60,8 +60,15 @@ algorithm:
   actor_hidden_sizes: [512, 256]
   critic_hidden_sizes: [512, 256]
   replay_capacity: 300000
-  true_guided_exploration: true
-  guidance_scale: 0.7
+  # guidance_mode options: "critic_guidance", "true_guidance", "mixed", "true_guidance_post_noise"
+  guidance_mode: "mixed"
+  mixed_guidance_steps: 1500000  # number of environment interactions before switching to critic-guided actions
+  guidance_schedule:
+    scale_init: 0.7
+    scale_final: 0.3
+    steps: 2000000
+  guided_actor_loss: false
+  guided_actor_loss_weight: 0.5
 
 training:
   max_epochs: 40

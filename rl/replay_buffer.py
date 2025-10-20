@@ -15,6 +15,7 @@ class Transition:
     discount: torch.Tensor
     next_polygon_state: torch.Tensor | None
     done: torch.Tensor
+    guided_target: torch.Tensor | None = None
 
 
 class ReplayBuffer:
@@ -57,6 +58,8 @@ class ReplayBuffer:
         self.next_polygons = torch.zeros((capacity, polygon_dim), dtype=torch.float32)
         self.dones = torch.zeros((capacity, 1), dtype=torch.float32)
         self.priorities = torch.zeros(capacity, dtype=torch.float32)
+        self.guided_targets = torch.zeros((capacity, action_dim), dtype=torch.float32)
+        self.guided_available = torch.zeros(capacity, dtype=torch.float32)
 
         self._position = 0
         self._size = 0
@@ -80,6 +83,13 @@ class ReplayBuffer:
             self.next_polygons[idx].copy_(transition.next_polygon_state.detach().to(dtype=torch.float32, device="cpu"))
 
         self.dones[idx].copy_(transition.done.detach().view(1).to(dtype=torch.float32, device="cpu"))
+
+        if transition.guided_target is None:
+            self.guided_targets[idx].zero_()
+            self.guided_available[idx] = 0.0
+        else:
+            self.guided_targets[idx].copy_(transition.guided_target.detach().to(dtype=torch.float32, device="cpu"))
+            self.guided_available[idx] = 1.0
 
         reward_abs = float(torch.abs(transition.reward.detach()).item())
         priority = max(self.pr_eps, reward_abs + self.pr_eps)
@@ -125,6 +135,8 @@ class ReplayBuffer:
             "discount": self.discounts[indices].to(target_device),
             "next_polygon": self.next_polygons[indices].to(target_device),
             "done": self.dones[indices].to(target_device),
+            "guided_target": self.guided_targets[indices].to(target_device),
+            "guided_available": self.guided_available[indices].to(target_device).view(-1, 1),
         }
         return batch, indices.to(device="cpu"), weights
 

@@ -42,7 +42,7 @@ class PolygonLocalizationEnv:
         self.config = config
         self.num_lines = int(config.num_sides)
         self.line_action_dim = self.num_lines * 2  # distance Δ, angle Δ
-        self.center_action_dim = 4  # up, down, left, right adjustments for center
+        self.center_action_dim = 2  # x and y adjustments for center
         self.action_dim = self.line_action_dim + self.center_action_dim + 1  # + stop score
         self.state_dim = self.num_lines * 2 + 2  # distances, angle offsets (degrees), center offsets
 
@@ -153,7 +153,6 @@ class PolygonLocalizationEnv:
         manual_stop = (stop_scores > 0.0) & active
 
         line_components = line_flat.view(batch_size, self.num_lines, 2)
-        center_components = center_flat
         update_mask = active & (~manual_stop)
         if update_mask.any():
             distance_delta = line_components[..., 0] * self.config.line_distance_step_scale
@@ -168,14 +167,9 @@ class PolygonLocalizationEnv:
             if self.center_offsets is None or self.center_positions is None:
                 raise RuntimeError("Center offsets not initialised.")
 
-            center_active = center_components[update_mask]
-            up = torch.relu(center_active[..., 0])
-            down = torch.relu(center_active[..., 1])
-            left = torch.relu(center_active[..., 2])
-            right = torch.relu(center_active[..., 3])
-
-            delta_y = (down - up) * self.config.center_step_scale
-            delta_x = (right - left) * self.config.center_step_scale
+            center_active = center_flat[update_mask]
+            delta_x = center_active[..., 0] * self.config.center_step_scale
+            delta_y = center_active[..., 1] * self.config.center_step_scale
             delta_center = torch.stack([delta_x, delta_y], dim=-1)
 
             offsets = self.center_offsets[update_mask] + delta_center

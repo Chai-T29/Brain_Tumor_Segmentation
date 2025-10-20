@@ -12,6 +12,13 @@ from .networks import Actor, Critic
 
 
 @dataclass
+class GuidanceScheduleConfig:
+    scale_init: float = 0.7
+    scale_final: float = 0.0
+    steps: int = 500000
+
+
+@dataclass
 class NoiseScheduleConfig:
     sigma_init: float = 1.0
     sigma_final: float = 0.1
@@ -40,7 +47,12 @@ class TD3Config:
     critic_hidden_sizes: tuple[int, ...] = (512, 512)
     guided_exploration: bool = False
     true_guided_exploration: bool = False
-    guidance_scale: float = 0.2
+    guidance_schedule: GuidanceScheduleConfig = field(default_factory=GuidanceScheduleConfig)
+    guided_actor_loss: bool = False
+    guided_actor_loss_weight: float = 0.01
+    # guidance_mode options: "critic_guidance", "true_guidance", "mixed", "true_guidance_post_noise"
+    guidance_mode: str = "true_guidance"
+    mixed_guidance_steps: int = 500000
 
 
 class EmbeddingProjector(nn.Module):
@@ -127,6 +139,27 @@ class TD3Agent(nn.Module):
         self.total_updates = 0
         self._interaction_count = 0
         self.warmup_steps = 0
+        # Normalise guidance mode and keep legacy flags in sync for backward compatibility.
+        normalized_mode = str(self.config.guidance_mode).lower()
+        valid_modes = {
+            "critic_guidance",
+            "true_guidance",
+            "mixed",
+            "true_guidance_post_noise",
+        }
+        if normalized_mode not in valid_modes:
+            raise ValueError(
+                "guidance_mode must be one of 'critic_guidance', 'true_guidance', "
+                "'mixed', or 'true_guidance_post_noise'."
+            )
+        self.config.guidance_mode = normalized_mode
+        self.config.guided_exploration = normalized_mode in ("critic_guidance", "mixed")
+        self.config.true_guided_exploration = normalized_mode in (
+            "true_guidance",
+            "true_guidance_post_noise",
+            "mixed",
+        )
+        self.config.mixed_guidance_steps = int(max(0, self.config.mixed_guidance_steps))
 
     def to(self, *args, **kwargs):
         module = super().to(*args, **kwargs)
@@ -170,7 +203,7 @@ class TD3Agent(nn.Module):
         if not self.config.guided_exploration:
             return noisy_action
 
-        guidance_scale = float(self.config.guidance_scale)
+        guidance_scale = self._current_guidance_scale()
         if guidance_scale <= 0.0:
             return noisy_action
 
@@ -209,28 +242,41 @@ class TD3Agent(nn.Module):
         guided_targets: torch.Tensor | None = None,
     ) -> torch.Tensor:
         self.actor.eval()
-        if self.config.guided_exploration and not self.config.true_guided_exploration:
+        mode = self._resolve_guidance_mode()
+        use_gradient_guidance = mode == "critic_guidance"
+        use_true_pre = mode == "true_guidance"
+        use_true_post = mode == "true_guidance_post_noise"
+
+        if use_gradient_guidance:
             self.critic.eval()
+
         emb = self._augment_embedding(embedding) if apply_embedding_noise else embedding
-        action = self.actor(emb, polygon_state)
-        base_action = action.clone()
+        raw_action = self.actor(emb, polygon_state)
+        action = raw_action.clone()
+
+        guidance_scale = self._current_guidance_scale()
+
+        if use_true_pre and guidance_scale > 0.0 and guided_targets is not None:
+            tgt = guided_targets.clamp(-1.0, 1.0)
+            action = (raw_action + guidance_scale * (tgt - raw_action)).clamp(-1.0, 1.0)
 
         if not deterministic:
             sigma = self._current_exploration_sigma()
             if sigma > 0:
                 noise = torch.randn_like(action) * sigma
                 noisy_action = action + noise
-                if self.config.guided_exploration and not self.config.true_guided_exploration:
+                if use_gradient_guidance:
                     noisy_action = self._guided_exploration_adjust(emb, polygon_state, noisy_action, sigma)
+                elif use_true_post and guidance_scale > 0.0 and guided_targets is not None:
+                    tgt = guided_targets.clamp(-1.0, 1.0)
+                    noisy_action = (noisy_action + guidance_scale * (tgt - noisy_action)).clamp(-1.0, 1.0)
                 action = noisy_action
             self._interaction_count += embedding.size(0)
-        # Apply mathematically derived guidance update after noise
-        if self.config.true_guided_exploration and guided_targets is not None:
-            guidance_scale = float(self.config.guidance_scale)
-            if guidance_scale > 0.0:
+        else:
+            if use_true_post and guidance_scale > 0.0 and guided_targets is not None:
                 tgt = guided_targets.clamp(-1.0, 1.0)
-                diff = tgt - base_action
-                action = (action + guidance_scale * diff).clamp(-1.0, 1.0)
+                action = (action + guidance_scale * (tgt - action)).clamp(-1.0, 1.0)
+
         return action.clamp_(-1.0, 1.0)
 
     def update(self, batch: Dict[str, torch.Tensor], weights: Optional[torch.Tensor] = None) -> Dict[str, float | torch.Tensor]:
@@ -280,9 +326,27 @@ class TD3Agent(nn.Module):
         # Actor update -------------------------------------------------------
         update_actor = (self.total_updates + 1) % max(1, self.config.policy_delay) == 0
         actor_loss_value: Optional[float] = None
+        guided_target = batch.get("guided_target")
+        guided_available = batch.get("guided_available")
+
+        guided_actor_mse: Optional[torch.Tensor] = None
+
         if update_actor:
             actor_action = self.actor(emb_aug, polygon)
             actor_loss = -self.critic.q1_forward(emb_aug, polygon, actor_action).mean()
+
+            if (
+                self.config.guided_actor_loss
+                and guided_target is not None
+                and guided_available is not None
+            ):
+                mask = guided_available.view(-1)
+                if mask.sum() > 0:
+                    diff = actor_action - guided_target
+                    mse_per_sample = diff.pow(2).mean(dim=-1)
+                    weighted_mse = (mse_per_sample * mask).sum() / mask.sum()
+                    guided_actor_mse = weighted_mse
+                    actor_loss = actor_loss + self.config.guided_actor_loss_weight * weighted_mse
             self.actor_opt.zero_grad(set_to_none=True)
             actor_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.config.max_grad_norm)
@@ -292,6 +356,9 @@ class TD3Agent(nn.Module):
 
             self._soft_update(self.actor, self.actor_target)
             self._soft_update(self.critic, self.critic_target)
+
+        if guided_actor_mse is not None:
+            metrics["guided_actor_mse"] = float(guided_actor_mse.item())
 
         td_errors = 0.5 * (torch.abs(td_error1.detach()) + torch.abs(td_error2.detach()))
         td_errors = td_errors.flatten()
@@ -314,6 +381,42 @@ class TD3Agent(nn.Module):
             return float(schedule.sigma_final)
         progress = min(1.0, progressed / float(schedule.steps))
         return float(schedule.sigma_init + (schedule.sigma_final - schedule.sigma_init) * progress)
+
+    def _current_guidance_scale(self) -> float:
+        schedule = self.config.guidance_schedule
+        init = float(schedule.scale_init)
+        final = float(schedule.scale_final)
+        if self._interaction_count < self.warmup_steps:
+            return init
+        progressed = self._interaction_count - self.warmup_steps
+        raw_steps = int(schedule.steps)
+        if raw_steps <= 0:
+            return final
+        steps = max(1, raw_steps)
+        progress = min(1.0, progressed / float(steps))
+        return float(init + (final - init) * progress)
+
+    def _resolve_guidance_mode(self) -> str:
+        mode = self.config.guidance_mode
+        if mode == "mixed":
+            if self._interaction_count < self.config.mixed_guidance_steps:
+                return "true_guidance"
+            return "critic_guidance"
+        return mode
+
+    @property
+    def requires_guided_targets(self) -> bool:
+        return self.config.guidance_mode in {
+            "true_guidance",
+            "true_guidance_post_noise",
+            "mixed",
+        }
+
+    def is_true_guidance_active(self) -> bool:
+        return self._resolve_guidance_mode() in {
+            "true_guidance",
+            "true_guidance_post_noise",
+        }
 
     def set_warmup_steps(self, warmup_steps: int) -> None:
         self.warmup_steps = max(0, int(warmup_steps))

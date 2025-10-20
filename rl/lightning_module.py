@@ -10,7 +10,7 @@ import torch
 import imageio.v2 as imageio
 import math
 
-from .agent import TD3Agent, TD3Config, NoiseScheduleConfig
+from .agent import TD3Agent, TD3Config, NoiseScheduleConfig, GuidanceScheduleConfig
 from .environment import EnvironmentConfig, PolygonLocalizationEnv
 from .n_step import NStepAccumulator, StepTuple
 from .replay_buffer import ReplayBuffer, Transition
@@ -58,6 +58,37 @@ class TD3Lightning(pl.LightningModule):
             algo_cfg["actor_hidden_sizes"] = tuple(algo_cfg["actor_hidden_sizes"])
         if "critic_hidden_sizes" in algo_cfg:
             algo_cfg["critic_hidden_sizes"] = tuple(algo_cfg["critic_hidden_sizes"])
+        if "guidance_schedule" in algo_cfg and isinstance(algo_cfg["guidance_schedule"], dict):
+            algo_cfg["guidance_schedule"] = GuidanceScheduleConfig(**algo_cfg["guidance_schedule"])
+        elif "guidance_scale" in algo_cfg:
+            raw = algo_cfg.pop("guidance_scale")
+            if isinstance(raw, dict):
+                initial = raw.get("initial", raw.get("scale_init", 0.0))
+                final = raw.get("final", raw.get("scale_final", 0.0))
+                steps = raw.get("steps", raw.get("scale_steps", 0))
+                algo_cfg["guidance_schedule"] = GuidanceScheduleConfig(
+                    scale_init=float(initial),
+                    scale_final=float(final),
+                    steps=int(steps),
+                )
+            else:
+                value = float(raw)
+                algo_cfg["guidance_schedule"] = GuidanceScheduleConfig(
+                    scale_init=value,
+                    scale_final=value,
+                    steps=1,
+                )
+        if "guidance_mode" not in algo_cfg:
+            if algo_cfg.get("true_guided_exploration", False):
+                algo_cfg["guidance_mode"] = "true_guidance"
+            elif algo_cfg.get("guided_exploration", False):
+                algo_cfg["guidance_mode"] = "critic_guidance"
+            else:
+                algo_cfg["guidance_mode"] = "critic_guidance"
+        else:
+            algo_cfg["guidance_mode"] = str(algo_cfg["guidance_mode"]).lower()
+        if "mixed_guidance_steps" not in algo_cfg:
+            algo_cfg["mixed_guidance_steps"] = 500000
         self.algo_config = TD3Config(**algo_cfg)
         self.training_config = TrainingConfig(**training_cfg)
         self.logging_cfg = logging_cfg or {}
@@ -133,9 +164,9 @@ class TD3Lightning(pl.LightningModule):
         if target_polygon_cpu is not None:
             target_polygon_cpu = target_polygon_cpu.to(torch.float32)
             target_polygon = target_polygon_cpu.to(self.device, non_blocking=True)
-        if self.agent.config.true_guided_exploration and target_polygon is None:
+        if self.agent.requires_guided_targets and target_polygon is None:
             raise RuntimeError(
-                "true_guided_exploration is enabled but dataset did not supply 'target_polygon_state'."
+                "Selected guidance mode requires 'target_polygon_state', but the dataset did not provide it."
             )
 
         polygon_state_cpu = self.environment.reset(images.cpu(), masks.cpu())
@@ -177,15 +208,25 @@ class TD3Lightning(pl.LightningModule):
         actor_loss_sum = 0.0
         critic_update_count = 0
         actor_update_count = 0
+        guided_actor_mse_sum = 0.0
+        guided_actor_mse_count = 0
 
         action_norm_total = 0.0
         distance_norm_total = 0.0
         angle_norm_total = 0.0
         action_measure_count = 0
+        # Extra diagnostics: stop usage and guidance reliance
+        stop_count_total = 0
+        active_step_count = 0
+        base_action_norm_total = 0.0
+        base_action_count = 0
+        guidance_diff_norm_total = 0.0
+        guidance_diff_count = 0
 
         def _maybe_run_updates() -> None:
             nonlocal performed_updates, critic_loss_sum, actor_loss_sum
             nonlocal critic_update_count, actor_update_count
+            nonlocal guided_actor_mse_sum, guided_actor_mse_count
             while performed_updates < batch_steps_completed // updates_trigger:
                 if len(self.replay) < self.training_config.update_batch_size:
                     break
@@ -198,6 +239,9 @@ class TD3Lightning(pl.LightningModule):
                 if "actor_loss" in metrics:
                     actor_loss_sum += metrics["actor_loss"]
                     actor_update_count += 1
+                if "guided_actor_mse" in metrics:
+                    guided_actor_mse_sum += float(metrics["guided_actor_mse"])
+                    guided_actor_mse_count += 1
                 if "td_errors" in metrics:
                     self.replay.update_priorities(batch_indices, metrics["td_errors"])
                 performed_updates += 1
@@ -213,36 +257,65 @@ class TD3Lightning(pl.LightningModule):
             actions = torch.zeros(batch_size, self.environment.action_dim, device=self.device)
 
             guidance_targets_full = None
-            if self.agent.config.true_guided_exploration and target_polygon is not None:
+            if target_polygon is not None:
                 current_iou = None
-            if self.environment.last_iou is not None:
-                current_iou = self.environment.last_iou.detach().to(self.device, dtype=polygon_state.dtype)
-            guidance_targets_full = self._compute_true_guidance_targets(
-                polygon_state,
-                target_polygon,
-                current_iou=current_iou,
-            )
+                if self.environment.last_iou is not None:
+                    current_iou = self.environment.last_iou.detach().to(self.device, dtype=polygon_state.dtype)
+                guidance_targets_full = self._compute_true_guidance_targets(
+                    polygon_state,
+                    target_polygon,
+                    current_iou=current_iou,
+                )
 
-            guided_subset = guidance_targets_full[active_indices] if guidance_targets_full is not None else None
-            chosen_actions = self.agent.act(
+            guided_subset = None
+            if guidance_targets_full is not None and active_indices.numel() > 0:
+                guided_subset = guidance_targets_full[active_indices]
+
+            base_policy_actions = None
+            if active_indices.numel() > 0:
+                with torch.no_grad():
+                    base_policy_actions = self.agent.actor(
+                        embeddings[active_indices],
+                        polygon_state[active_indices],
+                    )
+                    base_action_norm_total += float(base_policy_actions.norm(dim=-1).sum().item())
+                    base_action_count += int(base_policy_actions.size(0))
+
+                chosen_actions = self.agent.act(
                 embeddings[active_indices],
                 polygon_state[active_indices],
                 deterministic=False,
-                apply_embedding_noise=False if self.agent.config.true_guided_exploration else True,
+                apply_embedding_noise=not self.agent.is_true_guidance_active(),
                 guided_targets=guided_subset,
-            )
-            actions[active_indices] = chosen_actions
+                )
+                actions[active_indices] = chosen_actions
             actions_cpu = actions.detach().cpu()
 
-            action_norm_total += float(actions.norm(dim=-1).sum().item())
-            action_measure_count += actions.size(0)
-            if self.line_action_dim > 0:
-                line_actions = actions[:, : self.line_action_dim].view(batch_size, self.environment.num_lines, 2)
-                distance_norm_total += float(torch.linalg.norm(line_actions[..., 0], dim=-1).sum().item())
-                angle_norm_total += float(torch.linalg.norm(line_actions[..., 1], dim=-1).sum().item())
+            # Measure norms only over active envs to avoid bias from zeroed actions
+            if active_indices.numel() > 0:
+                active_actions = actions[active_indices]
+                action_norm_total += float(active_actions.norm(dim=-1).sum().item())
+                action_measure_count += int(active_actions.size(0))
+                if self.line_action_dim > 0:
+                    line_actions = active_actions[:, : self.line_action_dim].view(-1, self.environment.num_lines, 2)
+                    distance_norm_total += float(torch.linalg.norm(line_actions[..., 0], dim=-1).sum().item())
+                    angle_norm_total += float(torch.linalg.norm(line_actions[..., 1], dim=-1).sum().item())
 
             alive_before = alive_mask.clone()
             next_polygon_cpu, reward_cpu, done_cpu, info = self.environment.step(actions_cpu)
+
+            # Step-level diagnostics
+            active_step_count += int(alive_before.sum().item())
+            manual_stop = info.get("manual_stop")
+            if manual_stop is not None:
+                # Count only for active envs this step
+                stop_count_total += int((manual_stop & alive_before).sum().item())
+
+            if guided_subset is not None and base_policy_actions is not None and guided_subset.numel() > 0:
+                # Measure how far the base policy is from guided targets on active envs
+                gd = (guided_subset - base_policy_actions).detach()
+                guidance_diff_norm_total += float(gd.norm(dim=-1).sum().item())
+                guidance_diff_count += int(gd.size(0))
 
             if self.verbose:
                 avg_iou_val = float(info["iou"].mean().item())
@@ -274,6 +347,9 @@ class TD3Lightning(pl.LightningModule):
                 reward_tensor = reward_cpu[env_idx].view(1)
                 done_tensor = done_cpu[env_idx].view(1).to(torch.float32)
                 next_polygon_single = None if done_bool[env_idx].item() else next_polygon_cpu[env_idx]
+                guidance_tensor = None
+                if guidance_targets_full is not None:
+                    guidance_tensor = guidance_targets_full[env_idx].detach().cpu()
                 step_tuple = StepTuple(
                     embedding=embeddings_cpu[env_idx],
                     polygon=prev_polygon_cpu[env_idx],
@@ -281,9 +357,19 @@ class TD3Lightning(pl.LightningModule):
                     reward=reward_tensor,
                     next_polygon=next_polygon_single,
                     done=done_tensor,
+                    guided_target=guidance_tensor,
                 )
                 aggregated = accumulator.push(env_idx, step_tuple)
-                for embedding_t, polygon_t, action_t, reward_t, next_polygon_t, done_flag_t, discount_t in aggregated:
+                for (
+                    embedding_t,
+                    polygon_t,
+                    action_t,
+                    reward_t,
+                    next_polygon_t,
+                    done_flag_t,
+                    discount_t,
+                    guidance_t,
+                ) in aggregated:
                     transition = Transition(
                         embedding=embedding_t,
                         polygon_state=polygon_t,
@@ -292,6 +378,7 @@ class TD3Lightning(pl.LightningModule):
                         discount=discount_t.view(1),
                         next_polygon_state=next_polygon_t,
                         done=done_flag_t.view(1),
+                        guided_target=guidance_t,
                     )
                     self.replay.add(transition)
                     transitions_added += 1
@@ -307,7 +394,16 @@ class TD3Lightning(pl.LightningModule):
         leftover_transitions_added = 0
         for env_idx in range(batch_size):
             leftovers = accumulator.flush(env_idx)
-            for embedding_t, polygon_t, action_t, reward_t, next_polygon_t, done_flag_t, discount_t in leftovers:
+            for (
+                embedding_t,
+                polygon_t,
+                action_t,
+                reward_t,
+                next_polygon_t,
+                done_flag_t,
+                discount_t,
+                guidance_t,
+            ) in leftovers:
                 transition = Transition(
                     embedding=embedding_t,
                     polygon_state=polygon_t,
@@ -316,6 +412,7 @@ class TD3Lightning(pl.LightningModule):
                     discount=discount_t.view(1),
                     next_polygon_state=next_polygon_t,
                     done=done_flag_t.view(1),
+                    guided_target=guidance_t,
                 )
                 self.replay.add(transition)
                 transitions_added += 1
@@ -331,10 +428,29 @@ class TD3Lightning(pl.LightningModule):
         _maybe_run_updates()
 
         norm_count = max(1, action_measure_count)
+        stop_rate = (stop_count_total / max(1, active_step_count)) if active_step_count > 0 else 0.0
+        sigma_val = 0.0
+        try:
+            sigma_val = float(self.agent._current_exploration_sigma())
+        except Exception:
+            sigma_val = 0.0
+        guidance_scale_val = 0.0
+        try:
+            guidance_scale_val = float(self.agent._current_guidance_scale())
+        except Exception:
+            guidance_scale_val = 0.0
+        guided_actor_mse_mean = (
+            guided_actor_mse_sum / guided_actor_mse_count if guided_actor_mse_count > 0 else 0.0
+        )
         norm_metrics = {
             "train/action_norm": action_norm_total / norm_count,
             "train/distance_norm": distance_norm_total / norm_count,
             "train/angle_norm": angle_norm_total / norm_count,
+            "train/base_action_norm": (base_action_norm_total / max(1, base_action_count)),
+            "train/guided_diff_norm": (guidance_diff_norm_total / max(1, guidance_diff_count)),
+            "train/stop_rate": stop_rate,
+            "train/exploration_sigma": sigma_val,
+            "train/guidance_scale": guidance_scale_val,
         }
 
         mean_critic_loss = (
@@ -355,6 +471,7 @@ class TD3Lightning(pl.LightningModule):
                 "train/buffer_size": float(len(self.replay)),
                 "train/updates": float(performed_updates),
                 "train/transitions": float(transitions_added),
+                "train/guided_actor_mse": guided_actor_mse_mean,
             },
             on_step=True,
             on_epoch=True,
@@ -417,13 +534,7 @@ class TD3Lightning(pl.LightningModule):
         angle_diff_rad = torch.deg2rad(angle_diff_deg)
         angle_actions = torch.clamp(angle_diff_rad / angle_step_rad, min=-1.0, max=1.0)
 
-        diff_x = center_diff[:, 0]
-        diff_y = center_diff[:, 1]
-        up_action = torch.clamp(-diff_y / center_step_scale, min=0.0, max=1.0)
-        down_action = torch.clamp(diff_y / center_step_scale, min=0.0, max=1.0)
-        left_action = torch.clamp(-diff_x / center_step_scale, min=0.0, max=1.0)
-        right_action = torch.clamp(diff_x / center_step_scale, min=0.0, max=1.0)
-        center_actions = torch.stack([up_action, down_action, left_action, right_action], dim=1)
+        center_actions = torch.clamp(center_diff / center_step_scale, min=-1.0, max=1.0)
 
         distance_threshold = distance_scale
         angle_threshold = float(self.env_config.line_angle_step_scale_deg)

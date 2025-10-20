@@ -56,6 +56,15 @@ algorithm:
   pr_beta_start: 0.4
   pr_beta_steps: 200000
   pr_eps: 1.0e-6
+  # guidance_mode options: "critic_guidance", "true_guidance", "mixed", "true_guidance_post_noise"
+  guidance_mode: "true_guidance"
+  mixed_guidance_steps: 500000  # number of environment interactions before switching away from true guidance
+  guidance_schedule:
+    scale_init: 0.6
+    scale_final: 0.0
+    steps: 500000
+  guided_actor_loss: false
+  guided_actor_loss_weight: 0.01
   replay_capacity: 200000
 
 training:
