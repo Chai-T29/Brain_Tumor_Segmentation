@@ -22,7 +22,7 @@ def test_flush_preserves_bootstrap_for_truncated_sequences():
     transitions = accumulator.flush(0)
     assert len(transitions) == 2
 
-    _, _, _, reward_acc, next_polygon, done_flag, discount = transitions[0]
+    _, _, _, reward_acc, next_polygon, done_flag, discount, guidance_target = transitions[0]
     expected_reward = torch.tensor([1.0 + gamma * 1.0], dtype=torch.float32)
     assert torch.allclose(reward_acc, expected_reward)
     assert next_polygon is not None
@@ -30,6 +30,6 @@ def test_flush_preserves_bootstrap_for_truncated_sequences():
     expected_discount = torch.tensor(gamma ** 2, dtype=torch.float32)
     assert torch.allclose(discount, expected_discount)
 
-    _, _, _, _, _, done_flag_last, discount_last = transitions[1]
+    _, _, _, _, _, done_flag_last, discount_last, _ = transitions[1]
     assert done_flag_last.item() == 0.0
     assert torch.allclose(discount_last, torch.tensor(gamma, dtype=torch.float32))

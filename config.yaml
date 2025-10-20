@@ -1,24 +1,21 @@
 seed: 42
 verbose: false
-
 data:
-  data_dir: "MU-Glioma-Post/"
+  data_dir: MU-Glioma-Post/
   batch_size: 16
-  num_workers: 8
+  num_workers: 4
   persistent_workers: true
   pin_memory: false
-  prefetch_factor: 4
+  prefetch_factor: 2
   val_split: 0.3
   test_split: 0.2
   include_empty_masks: false
-  embedding_device: "mps"
-
+  embedding_device: cpu
 encoder:
-  name: "efficientnet_b0"
+  name: efficientnet_b0
   pretrained: true
   trainable: false
   embedding_noise_std: 0.01
-
 environment:
   num_sides: 32
   max_steps: 60
@@ -36,7 +33,6 @@ environment:
   reward_false_stop: -3.0
   time_penalty: 0.02
   hold_penalty: 0.5
-
 algorithm:
   gamma: 0.99
   n_step: 3
@@ -56,27 +52,36 @@ algorithm:
   pr_alpha: 0.6
   pr_beta_start: 0.4
   pr_beta_steps: 200000
-  pr_eps: 1.0e-6
-  actor_hidden_sizes: [512, 256]
-  critic_hidden_sizes: [512, 256]
+  pr_eps: 1.0e-06
+  actor_hidden_sizes:
+  - 512
+  - 256
+  critic_hidden_sizes:
+  - 512
+  - 256
   replay_capacity: 300000
   true_guided_exploration: true
   guidance_scale: 0.7
-
+  guided_actor_loss: true
+  guided_actor_loss_weight: 0.01
+  guidance_schedule:
+    initial: 0.7
+    final: 0.0
+    steps: 200000
+  guided_actor_loss_scale_with_guidance: true
 training:
   max_epochs: 40
-  precision: "32-true"
+  precision: 32-true
   update_batch_size: 256
   update_every_n_steps: 1
   collect_steps_per_batch: 50
   warmup_steps: 1000
   log_interval: 1
-
 logging:
-  log_dir: "lightning_logs"
-  logger_name: "td3_agent"
-  checkpoint_dir: "checkpoints"
+  log_dir: lightning_logs
+  logger_name: td3_agent
+  checkpoint_dir: checkpoints
   test_gif_limit: 10
-  test_gif_dir: "lightning_logs/test_gifs"
+  test_gif_dir: lightning_logs/test_gifs
   test_gif_fps: 4
   early_stopping_patience: 20

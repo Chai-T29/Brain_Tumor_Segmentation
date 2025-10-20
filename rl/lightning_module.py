@@ -10,7 +10,7 @@ import torch
 import imageio.v2 as imageio
 import math
 
-from .agent import TD3Agent, TD3Config, NoiseScheduleConfig
+from .agent import TD3Agent, TD3Config, NoiseScheduleConfig, GuidanceScheduleConfig
 from .environment import EnvironmentConfig, PolygonLocalizationEnv
 from .n_step import NStepAccumulator, StepTuple
 from .replay_buffer import ReplayBuffer, Transition
@@ -54,6 +54,8 @@ class TD3Lightning(pl.LightningModule):
         algo_cfg = dict(algo_cfg)
         if "exploration_noise" in algo_cfg and isinstance(algo_cfg["exploration_noise"], dict):
             algo_cfg["exploration_noise"] = NoiseScheduleConfig(**algo_cfg["exploration_noise"])
+        if "guidance_schedule" in algo_cfg and isinstance(algo_cfg["guidance_schedule"], dict):
+            algo_cfg["guidance_schedule"] = GuidanceScheduleConfig(**algo_cfg["guidance_schedule"])
         if "actor_hidden_sizes" in algo_cfg:
             algo_cfg["actor_hidden_sizes"] = tuple(algo_cfg["actor_hidden_sizes"])
         if "critic_hidden_sizes" in algo_cfg:
@@ -215,24 +217,26 @@ class TD3Lightning(pl.LightningModule):
             guidance_targets_full = None
             if self.agent.config.true_guided_exploration and target_polygon is not None:
                 current_iou = None
-            if self.environment.last_iou is not None:
-                current_iou = self.environment.last_iou.detach().to(self.device, dtype=polygon_state.dtype)
-            guidance_targets_full = self._compute_true_guidance_targets(
-                polygon_state,
-                target_polygon,
-                current_iou=current_iou,
-            )
+                if self.environment.last_iou is not None:
+                    current_iou = self.environment.last_iou.detach().to(self.device, dtype=polygon_state.dtype)
+                guidance_targets_full = self._compute_true_guidance_targets(
+                    polygon_state,
+                    target_polygon,
+                    current_iou=current_iou,
+                )
 
             guided_subset = guidance_targets_full[active_indices] if guidance_targets_full is not None else None
-            chosen_actions = self.agent.act(
+            chosen_actions, _ = self.agent.act(
                 embeddings[active_indices],
                 polygon_state[active_indices],
                 deterministic=False,
                 apply_embedding_noise=False if self.agent.config.true_guided_exploration else True,
                 guided_targets=guided_subset,
+                return_base_action=True,
             )
             actions[active_indices] = chosen_actions
             actions_cpu = actions.detach().cpu()
+            guidance_targets_cpu = guidance_targets_full.detach().cpu() if guidance_targets_full is not None else None
 
             action_norm_total += float(actions.norm(dim=-1).sum().item())
             action_measure_count += actions.size(0)
@@ -271,6 +275,9 @@ class TD3Lightning(pl.LightningModule):
             success_flags = success_flags | success_device
 
             for env_idx in active_indices.tolist():
+                guidance_target_single = None
+                if guidance_targets_cpu is not None:
+                    guidance_target_single = guidance_targets_cpu[env_idx]
                 reward_tensor = reward_cpu[env_idx].view(1)
                 done_tensor = done_cpu[env_idx].view(1).to(torch.float32)
                 next_polygon_single = None if done_bool[env_idx].item() else next_polygon_cpu[env_idx]
@@ -281,9 +288,10 @@ class TD3Lightning(pl.LightningModule):
                     reward=reward_tensor,
                     next_polygon=next_polygon_single,
                     done=done_tensor,
+                    guidance_target=guidance_target_single,
                 )
                 aggregated = accumulator.push(env_idx, step_tuple)
-                for embedding_t, polygon_t, action_t, reward_t, next_polygon_t, done_flag_t, discount_t in aggregated:
+                for embedding_t, polygon_t, action_t, reward_t, next_polygon_t, done_flag_t, discount_t, guidance_target_t in aggregated:
                     transition = Transition(
                         embedding=embedding_t,
                         polygon_state=polygon_t,
@@ -292,6 +300,7 @@ class TD3Lightning(pl.LightningModule):
                         discount=discount_t.view(1),
                         next_polygon_state=next_polygon_t,
                         done=done_flag_t.view(1),
+                        guidance_target=guidance_target_t,
                     )
                     self.replay.add(transition)
                     transitions_added += 1
@@ -307,7 +316,7 @@ class TD3Lightning(pl.LightningModule):
         leftover_transitions_added = 0
         for env_idx in range(batch_size):
             leftovers = accumulator.flush(env_idx)
-            for embedding_t, polygon_t, action_t, reward_t, next_polygon_t, done_flag_t, discount_t in leftovers:
+            for embedding_t, polygon_t, action_t, reward_t, next_polygon_t, done_flag_t, discount_t, guidance_target_t in leftovers:
                 transition = Transition(
                     embedding=embedding_t,
                     polygon_state=polygon_t,
@@ -316,6 +325,7 @@ class TD3Lightning(pl.LightningModule):
                     discount=discount_t.view(1),
                     next_polygon_state=next_polygon_t,
                     done=done_flag_t.view(1),
+                    guidance_target=guidance_target_t,
                 )
                 self.replay.add(transition)
                 transitions_added += 1

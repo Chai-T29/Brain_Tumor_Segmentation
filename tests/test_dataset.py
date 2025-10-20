@@ -1,3 +1,4 @@
+import pickle
 import numpy as np
 import nibabel as nib
 import torch
@@ -61,3 +62,10 @@ def test_datamodule_exposes_negative_samples_when_enabled(tmp_path):
 
     mask_sums = {torch.sum(batch["mask"]).item() for batch in batches}
     assert 0.0 in mask_sums
+
+
+def test_dataset_picklable(tmp_path):
+    _create_mock_dataset(tmp_path)
+    dataset = BrainTumorDataset(str(tmp_path), include_empty_masks=True)
+    cloned = pickle.loads(pickle.dumps(dataset))
+    assert len(cloned) == len(dataset)

@@ -79,6 +79,16 @@ class BrainTumorDataset(Dataset):
         if self._env_config is not None:
             self._precompute_ground_truth()
 
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state['_mm_cache'] = {}
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._mm_cache = {}
+
     def __len__(self):
         return len(self.samples)
 

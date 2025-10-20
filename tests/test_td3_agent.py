@@ -31,6 +31,15 @@ def test_td3_agent_action_bounds():
     assert torch.all(action <= 1.0 + 1e-6)
     assert torch.all(action >= -1.0 - 1e-6)
 
+    action_guided, base_action = agent.act(
+        embedding,
+        polygon_state,
+        deterministic=False,
+        return_base_action=True,
+    )
+    assert action_guided.shape == (3, 9)
+    assert base_action.shape == (3, 9)
+
     deterministic_action = agent.act(embedding, polygon_state, deterministic=True, apply_embedding_noise=False)
     assert torch.all(deterministic_action <= 1.0 + 1e-6)
     assert torch.all(deterministic_action >= -1.0 - 1e-6)
@@ -78,6 +87,11 @@ def test_replay_buffer_sample_shapes():
     assert batch["discount"].shape == (4, 1)
     assert batch["next_polygon"].shape == (4, 6)
     assert batch["done"].shape == (4, 1)
+    assert batch["guidance_target"].shape == (4, 9)
+    assert torch.allclose(batch["guidance_target"], torch.zeros_like(batch["guidance_target"]))
+    assert batch["guidance_mask"].shape == (4,)
+    assert batch["guidance_mask"].dtype == torch.bool
+    assert not batch["guidance_mask"].any()
     assert indices.shape[0] == 4
     assert weights.shape[0] == 4
 
@@ -101,7 +115,7 @@ def test_warmup_keeps_sigma_constant():
 
 def test_guidance_targets_match_action_layout():
     env_cfg = {
-        "num_sides": 2,
+        "num_sides": 3,
         "line_distance_step_scale": 2.0,
         "line_angle_step_scale_deg": 10.0,
         "center_step_scale": 1.0,
@@ -138,5 +152,18 @@ def test_guidance_targets_match_action_layout():
 
     guidance = module._compute_true_guidance_targets(current_state, target_state)
 
-    expected = torch.tensor([1.0, 1.0, 0.0, 0.0], dtype=guidance.dtype)
-    assert torch.allclose(guidance[0, : num_lines * 2], expected, atol=1e-5)
+    distance_actions = guidance[0, :num_lines]
+    angle_actions = guidance[0, num_lines : 2 * num_lines]
+    center_actions = guidance[0, 2 * num_lines : 2 * num_lines + 4]
+    stop_action = guidance[0, -1]
+
+    assert distance_actions.shape[0] == num_lines
+    assert angle_actions.shape[0] == num_lines
+    assert torch.isclose(distance_actions[0], torch.tensor(1.0, dtype=guidance.dtype), atol=1e-5)
+    assert torch.all(distance_actions.abs() <= 1.0 + 1e-6)
+    assert torch.all(angle_actions.abs() <= 1.0 + 1e-6)
+    assert center_actions.shape[0] == 4
+    assert torch.all(center_actions <= 1.0 + 1e-6)
+    assert torch.all(center_actions >= 0.0 - 1e-6)
+    assert stop_action <= 1.0 + 1e-6
+    assert stop_action >= -1.0 - 1e-6

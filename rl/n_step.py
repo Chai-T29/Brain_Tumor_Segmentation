@@ -15,6 +15,7 @@ class StepTuple:
     reward: torch.Tensor
     next_polygon: torch.Tensor | None
     done: torch.Tensor
+    guidance_target: torch.Tensor | None = None
 
 
 class NStepAccumulator:
@@ -27,30 +28,30 @@ class NStepAccumulator:
         self.gamma = gamma
         self.buffers: List[Deque[StepTuple]] = [deque() for _ in range(num_envs)]
 
-    def push(self, env_idx: int, step: StepTuple) -> List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]]:
+    def push(self, env_idx: int, step: StepTuple) -> List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor, torch.Tensor | None]]:
         buffer = self.buffers[env_idx]
         buffer.append(step)
-        transitions: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]] = []
+        transitions: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor, torch.Tensor | None]] = []
 
         while buffer and (len(buffer) >= self.n_step or buffer[0].done.bool().item()):
-            embedding, polygon, action, reward_acc, next_polygon, done_flag, discount = self._pop_transition(buffer, allow_partial=False)
-            transitions.append((embedding, polygon, action, reward_acc, next_polygon, done_flag, discount))
+            embedding, polygon, action, reward_acc, next_polygon, done_flag, discount, guidance_target = self._pop_transition(buffer, allow_partial=False)
+            transitions.append((embedding, polygon, action, reward_acc, next_polygon, done_flag, discount, guidance_target))
 
         return transitions
 
-    def flush(self, env_idx: int) -> List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]]:
+    def flush(self, env_idx: int) -> List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor, torch.Tensor | None]]:
         buffer = self.buffers[env_idx]
-        transitions: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]] = []
+        transitions: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor, torch.Tensor | None]] = []
         while buffer:
-            embedding, polygon, action, reward_acc, next_polygon, done_flag, discount = self._pop_transition(buffer, allow_partial=True)
-            transitions.append((embedding, polygon, action, reward_acc, next_polygon, done_flag, discount))
+            embedding, polygon, action, reward_acc, next_polygon, done_flag, discount, guidance_target = self._pop_transition(buffer, allow_partial=True)
+            transitions.append((embedding, polygon, action, reward_acc, next_polygon, done_flag, discount, guidance_target))
         return transitions
 
     def _pop_transition(
         self,
         buffer: Deque[StepTuple],
         allow_partial: bool,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor, torch.Tensor | None]:
         if not buffer:
             raise RuntimeError("Attempted to pop from an empty buffer.")
 
@@ -84,4 +85,4 @@ class NStepAccumulator:
             raise RuntimeError("Insufficient steps to pop transition without partial allowance.")
 
         first = buffer.popleft()
-        return first.embedding, first.polygon, first.action, reward_acc, next_polygon, done_flag, discount
+        return first.embedding, first.polygon, first.action, reward_acc, next_polygon, done_flag, discount, first.guidance_target

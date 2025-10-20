@@ -19,6 +19,13 @@ class NoiseScheduleConfig:
 
 
 @dataclass
+class GuidanceScheduleConfig:
+    initial: float = 0.7
+    final: float = 0.0
+    steps: int = 500000
+
+
+@dataclass
 class TD3Config:
     gamma: float = 0.99
     tau: float = 0.005
@@ -41,6 +48,10 @@ class TD3Config:
     guided_exploration: bool = False
     true_guided_exploration: bool = False
     guidance_scale: float = 0.2
+    guided_actor_loss: bool = False
+    guided_actor_loss_weight: float = 0.01
+    guided_actor_loss_scale_with_guidance: bool = True
+    guidance_schedule: Optional[GuidanceScheduleConfig] = None
 
 
 class EmbeddingProjector(nn.Module):
@@ -163,15 +174,11 @@ class TD3Agent(nn.Module):
         embedding: torch.Tensor,
         polygon_state: torch.Tensor,
         noisy_action: torch.Tensor,
-        sigma: float
+        guidance_scale: float,
     ) -> torch.Tensor:
         """Adjust a noisy action using the critic gradient if it improves value."""
 
-        if not self.config.guided_exploration:
-            return noisy_action
-
-        guidance_scale = float(self.config.guidance_scale)
-        if guidance_scale <= 0.0:
+        if not self.config.guided_exploration or guidance_scale <= 0.0:
             return noisy_action
 
         emb = embedding.detach()
@@ -199,6 +206,7 @@ class TD3Agent(nn.Module):
         improved = (q_min_new > q_min_original).view(-1, 1)
         return torch.where(improved, candidate_action, noisy_action)
 
+    
     @torch.no_grad()
     def act(
         self,
@@ -207,7 +215,8 @@ class TD3Agent(nn.Module):
         deterministic: bool = False,
         apply_embedding_noise: bool = True,
         guided_targets: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        return_base_action: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         self.actor.eval()
         if self.config.guided_exploration and not self.config.true_guided_exploration:
             self.critic.eval()
@@ -215,23 +224,28 @@ class TD3Agent(nn.Module):
         action = self.actor(emb, polygon_state)
         base_action = action.clone()
 
+        guidance_scale = self._current_guidance_scale()
+
         if not deterministic:
             sigma = self._current_exploration_sigma()
             if sigma > 0:
                 noise = torch.randn_like(action) * sigma
                 noisy_action = action + noise
                 if self.config.guided_exploration and not self.config.true_guided_exploration:
-                    noisy_action = self._guided_exploration_adjust(emb, polygon_state, noisy_action, sigma)
+                    noisy_action = self._guided_exploration_adjust(emb, polygon_state, noisy_action, guidance_scale)
                 action = noisy_action
             self._interaction_count += embedding.size(0)
         # Apply mathematically derived guidance update after noise
-        if self.config.true_guided_exploration and guided_targets is not None:
-            guidance_scale = float(self.config.guidance_scale)
-            if guidance_scale > 0.0:
-                tgt = guided_targets.clamp(-1.0, 1.0)
-                diff = tgt - base_action
-                action = (action + guidance_scale * diff).clamp(-1.0, 1.0)
-        return action.clamp_(-1.0, 1.0)
+        if self.config.true_guided_exploration and guided_targets is not None and guidance_scale > 0.0:
+            tgt = guided_targets.clamp(-1.0, 1.0)
+            diff = tgt - base_action
+            action = action + guidance_scale * diff
+
+        final_action = action.clamp(-1.0, 1.0)
+        base_clamped = base_action.clamp(-1.0, 1.0)
+        if return_base_action:
+            return final_action, base_clamped
+        return final_action
 
     def update(self, batch: Dict[str, torch.Tensor], weights: Optional[torch.Tensor] = None) -> Dict[str, float | torch.Tensor]:
         self.actor.train()
@@ -280,15 +294,57 @@ class TD3Agent(nn.Module):
         # Actor update -------------------------------------------------------
         update_actor = (self.total_updates + 1) % max(1, self.config.policy_delay) == 0
         actor_loss_value: Optional[float] = None
+        guidance_loss_value: Optional[float] = None
+        guidance_scale_metric: Optional[float] = None
         if update_actor:
             actor_action = self.actor(emb_aug, polygon)
             actor_loss = -self.critic.q1_forward(emb_aug, polygon, actor_action).mean()
+            if self.config.guided_actor_loss:
+                guidance_target = batch.get('guidance_target')
+                guidance_mask = batch.get('guidance_mask')
+                if guidance_target is not None and guidance_mask is not None:
+                    target = guidance_target.to(actor_action.device, dtype=actor_action.dtype)
+                    mask = guidance_mask.to(actor_action.device)
+                    if mask.dtype != torch.bool:
+                        mask = mask.to(dtype=torch.bool)
+                    if mask.dim() == 1:
+                        mask = mask.unsqueeze(-1)
+                    mask_float = mask.to(dtype=actor_action.dtype)
+                    supervised = mask_float.sum()
+                    if float(supervised.detach().item()) > 0.0:
+                        diff = actor_action - target
+                        mse = (diff.pow(2) * mask_float).sum() / (supervised * actor_action.size(-1))
+                        loss_weight = self.config.guided_actor_loss_weight
+                        scale_factor = 1.0
+                        current_guidance = float(self._current_guidance_scale())
+                        if self.config.guided_actor_loss_scale_with_guidance:
+                            scale_factor = max(0.0, 1.0 - current_guidance)
+                        scaled_weight = loss_weight * scale_factor
+                        guidance_scale_metric = float(scale_factor)
+                        if scaled_weight > 0.0:
+                            actor_loss = actor_loss + scaled_weight * mse
+                            guidance_loss_value = float((scaled_weight * mse).detach().item())
+                        else:
+                            guidance_loss_value = None
+                    else:
+                        guidance_loss_value = None
+                        guidance_scale_metric = None
+                else:
+                    guidance_loss_value = None
+                    guidance_scale_metric = None
+            else:
+                guidance_loss_value = None
+                guidance_scale_metric = None
             self.actor_opt.zero_grad(set_to_none=True)
             actor_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.config.max_grad_norm)
             self.actor_opt.step()
             actor_loss_value = float(actor_loss.item())
             metrics["actor_loss"] = actor_loss_value
+            if guidance_loss_value is not None:
+                metrics['actor_guidance_loss'] = guidance_loss_value
+            if guidance_scale_metric is not None:
+                metrics["actor_guidance_scale"] = guidance_scale_metric
 
             self._soft_update(self.actor, self.actor_target)
             self._soft_update(self.critic, self.critic_target)
@@ -314,6 +370,17 @@ class TD3Agent(nn.Module):
             return float(schedule.sigma_final)
         progress = min(1.0, progressed / float(schedule.steps))
         return float(schedule.sigma_init + (schedule.sigma_final - schedule.sigma_init) * progress)
+
+
+    def _current_guidance_scale(self) -> float:
+        schedule = self.config.guidance_schedule
+        if schedule is not None:
+            steps = max(1, int(schedule.steps))
+            progress = 0.0
+            if steps > 0:
+                progress = min(1.0, max(0.0, self._interaction_count / float(steps)))
+            return float(schedule.initial + (schedule.final - schedule.initial) * progress)
+        return float(self.config.guidance_scale)
 
     def set_warmup_steps(self, warmup_steps: int) -> None:
         self.warmup_steps = max(0, int(warmup_steps))
