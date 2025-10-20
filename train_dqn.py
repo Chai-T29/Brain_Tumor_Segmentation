@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 from pathlib import Path
 from typing import Dict
+import argparse
 
 import numpy as np
 import pytorch_lightning as pl
@@ -58,6 +59,14 @@ def load_config(path: str) -> Dict:
     with open(path, "r", encoding="utf-8") as handle:
         return yaml.safe_load(handle)
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train or resume the TD3 agent")
+    parser.add_argument("--config", default="config.yaml", help="Path to YAML config file")
+    parser.add_argument("--resume", default=None, help="Path to Lightning checkpoint to resume from")
+    parser.add_argument("--logger-version", default=None, help="Logger version directory to reuse (e.g. version_13)")
+    parser.add_argument("--logger-name", default=None, help="Override logger name from config")
+    return parser.parse_args()
+
 
 def _seed_everything(seed: int) -> None:
     pl.seed_everything(seed, workers=True)
@@ -66,8 +75,11 @@ def _seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
 
 
-def main() -> None:
-    config = load_config("config.yaml")
+def main(args: argparse.Namespace | None = None) -> None:
+    if args is None:
+        args = parse_args()
+
+    config = load_config(args.config)
     seed = config.get("seed", 42)
     verbose = bool(config.get("verbose", False))
     _seed_everything(seed)
@@ -120,10 +132,15 @@ def main() -> None:
     if verbose:
         print("[Verbose] Configuring trainer...")
 
-    logger = TensorBoardLogger(
-        save_dir=logging_cfg.get("log_dir", "lightning_logs"),
-        name=logging_cfg.get("logger_name", "td3_agent"),
-    )
+    log_dir = logging_cfg.get("log_dir", "lightning_logs")
+    logger_name = args.logger_name or logging_cfg.get("logger_name", "td3_agent")
+    logger_kwargs = {"save_dir": log_dir, "name": logger_name}
+    if args.logger_version is not None:
+        logger_kwargs["version"] = args.logger_version
+    logger = TensorBoardLogger(**logger_kwargs)
+
+    if verbose:
+        print(f"[Verbose] Logging to {logger.log_dir}")
 
     checkpoint_dir = Path(logger.log_dir) / Path(logging_cfg.get("checkpoint_dir", "checkpoints")).name
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -151,6 +168,15 @@ def main() -> None:
         simple_ckpt,
     ]
 
+    ckpt_path = None
+    if args.resume:
+        ckpt_candidate = Path(args.resume)
+        if not ckpt_candidate.is_file():
+            raise FileNotFoundError(f"Checkpoint not found: {ckpt_candidate}")
+        ckpt_path = str(ckpt_candidate.resolve())
+        if verbose:
+            print(f"[Verbose] Resuming from checkpoint {ckpt_path}")
+
     if verbose:
         print("[Verbose] Starting training loop...")
 
@@ -168,7 +194,7 @@ def main() -> None:
         enable_checkpointing=True,
     )
 
-    trainer.fit(model, datamodule=data_module)
+    trainer.fit(model, datamodule=data_module, ckpt_path=ckpt_path)
 
     if verbose:
         print("[Verbose] Training completed.")
