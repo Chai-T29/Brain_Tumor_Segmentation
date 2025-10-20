@@ -179,6 +179,8 @@ class TD3Lightning(pl.LightningModule):
         actor_loss_sum = 0.0
         critic_update_count = 0
         actor_update_count = 0
+        guidance_scale_sum = 0.0
+        guidance_scale_count = 0
 
         action_norm_total = 0.0
         distance_norm_total = 0.0
@@ -187,7 +189,7 @@ class TD3Lightning(pl.LightningModule):
 
         def _maybe_run_updates() -> None:
             nonlocal performed_updates, critic_loss_sum, actor_loss_sum
-            nonlocal critic_update_count, actor_update_count
+            nonlocal critic_update_count, actor_update_count, guidance_scale_sum, guidance_scale_count
             while performed_updates < batch_steps_completed // updates_trigger:
                 if len(self.replay) < self.training_config.update_batch_size:
                     break
@@ -200,6 +202,22 @@ class TD3Lightning(pl.LightningModule):
                 if "actor_loss" in metrics:
                     actor_loss_sum += metrics["actor_loss"]
                     actor_update_count += 1
+                guidance_value = metrics.get("guidance_scale")
+                if guidance_value is not None:
+                    if isinstance(guidance_value, torch.Tensor):
+                        guidance_scalar = float(guidance_value.detach().mean().item())
+                    else:
+                        guidance_scalar = float(guidance_value)
+                    self.log(
+                        "train/guidance_scale_step",
+                        guidance_scalar,
+                        on_step=True,
+                        on_epoch=False,
+                        prog_bar=False,
+                        sync_dist=False,
+                    )
+                    guidance_scale_sum += guidance_scalar
+                    guidance_scale_count += 1
                 if "td_errors" in metrics:
                     self.replay.update_priorities(batch_indices, metrics["td_errors"])
                 performed_updates += 1
@@ -353,6 +371,7 @@ class TD3Lightning(pl.LightningModule):
         mean_actor_loss = (
             float(actor_loss_sum / actor_update_count) if actor_update_count > 0 else 0.0
         )
+        guidance_avg = guidance_scale_sum / guidance_scale_count if guidance_scale_count > 0 else 0.0
 
         self.log_dict(
             {
@@ -362,6 +381,7 @@ class TD3Lightning(pl.LightningModule):
                 "train/success_rate": success_flags.float().mean(),
                 "train/critic_loss": mean_critic_loss,
                 "train/actor_loss": mean_actor_loss,
+                "train/guidance_scale": guidance_avg,
                 "train/buffer_size": float(len(self.replay)),
                 "train/updates": float(performed_updates),
                 "train/transitions": float(transitions_added),
