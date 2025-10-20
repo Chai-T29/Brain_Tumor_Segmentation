@@ -10,7 +10,13 @@ import torch
 import imageio.v2 as imageio
 import math
 
-from .agent import TD3Agent, TD3Config, NoiseScheduleConfig, GuidanceScheduleConfig
+from .agent import (
+    TD3Agent,
+    TD3Config,
+    NoiseScheduleConfig,
+    GuidanceScheduleConfig,
+    LRScheduleConfig,
+)
 from .environment import EnvironmentConfig, PolygonLocalizationEnv
 from .n_step import NStepAccumulator, StepTuple
 from .replay_buffer import ReplayBuffer, Transition
@@ -89,6 +95,11 @@ class TD3Lightning(pl.LightningModule):
             algo_cfg["guidance_mode"] = str(algo_cfg["guidance_mode"]).lower()
         if "mixed_guidance_steps" not in algo_cfg:
             algo_cfg["mixed_guidance_steps"] = 500000
+        # LR schedules (optional)
+        if "actor_lr_schedule" in algo_cfg and isinstance(algo_cfg["actor_lr_schedule"], dict):
+            algo_cfg["actor_lr_schedule"] = LRScheduleConfig(**algo_cfg["actor_lr_schedule"])
+        if "critic_lr_schedule" in algo_cfg and isinstance(algo_cfg["critic_lr_schedule"], dict):
+            algo_cfg["critic_lr_schedule"] = LRScheduleConfig(**algo_cfg["critic_lr_schedule"])
         self.algo_config = TD3Config(**algo_cfg)
         self.training_config = TrainingConfig(**training_cfg)
         self.logging_cfg = logging_cfg or {}
@@ -150,6 +161,7 @@ class TD3Lightning(pl.LightningModule):
         return []
 
     def training_step(self, batch, batch_idx: int):
+        self.agent.set_epoch(self.current_epoch)
         images = batch["image"].to(self.device, non_blocking=True)
         masks = batch["mask"].to(self.device, non_blocking=True)
         batch_size = images.size(0)

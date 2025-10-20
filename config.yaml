@@ -51,7 +51,7 @@ algorithm:
   target_policy_noise_std: 0.1
   target_policy_noise_clip: 0.3
   max_grad_norm: 10.0
-  embedding_noise_std: 0.01
+  embedding_noise_std: 0.0
   embedding_projected_dim: 1280
   pr_alpha: 0.6
   pr_beta_start: 0.4
@@ -60,8 +60,8 @@ algorithm:
   actor_hidden_sizes: [512, 256]
   critic_hidden_sizes: [512, 256]
   replay_capacity: 300000
-  # guidance_mode options: "critic_guidance", "true_guidance", "mixed", "true_guidance_post_noise"
-  guidance_mode: "mixed"
+  # guidance_mode options: "critic_guidance", "true_guidance", "mixed", "true_guidance_post_noise", "random_true_guidance"
+  guidance_mode: "random_true_guidance"
   mixed_guidance_steps: 1500000  # number of environment interactions before switching to critic-guided actions
   guidance_schedule:
     scale_init: 0.7
@@ -69,6 +69,14 @@ algorithm:
     steps: 2000000
   guided_actor_loss: false
   guided_actor_loss_weight: 0.5
+  actor_lr_schedule:
+    lr_init: 0.001
+    lr_final: 0.0001
+    steps: 10  # number of epochs to reach lr_final
+  critic_lr_schedule:
+    lr_init: 0.001
+    lr_final: 0.0001
+    steps: 10
 
 training:
   max_epochs: 40

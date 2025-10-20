@@ -19,6 +19,17 @@ class GuidanceScheduleConfig:
 
 
 @dataclass
+class LRScheduleConfig:
+    """Linear learning-rate decay schedule.
+
+    lr = lr_init + (lr_final - lr_init) * clamp(step/steps, 0, 1)
+    """
+    lr_init: float
+    lr_final: float
+    steps: int = 500000
+
+
+@dataclass
 class NoiseScheduleConfig:
     sigma_init: float = 1.0
     sigma_final: float = 0.1
@@ -50,9 +61,11 @@ class TD3Config:
     guidance_schedule: GuidanceScheduleConfig = field(default_factory=GuidanceScheduleConfig)
     guided_actor_loss: bool = False
     guided_actor_loss_weight: float = 0.01
-    # guidance_mode options: "critic_guidance", "true_guidance", "mixed", "true_guidance_post_noise"
+    # guidance_mode options: "critic_guidance", "true_guidance", "mixed", "true_guidance_post_noise", "random_true_guidance"
     guidance_mode: str = "true_guidance"
     mixed_guidance_steps: int = 500000
+    actor_lr_schedule: Optional[LRScheduleConfig] = None
+    critic_lr_schedule: Optional[LRScheduleConfig] = None
 
 
 class EmbeddingProjector(nn.Module):
@@ -139,6 +152,7 @@ class TD3Agent(nn.Module):
         self.total_updates = 0
         self._interaction_count = 0
         self.warmup_steps = 0
+        self.current_epoch = 0
         # Normalise guidance mode and keep legacy flags in sync for backward compatibility.
         normalized_mode = str(self.config.guidance_mode).lower()
         valid_modes = {
@@ -146,6 +160,7 @@ class TD3Agent(nn.Module):
             "true_guidance",
             "mixed",
             "true_guidance_post_noise",
+            "random_true_guidance",
         }
         if normalized_mode not in valid_modes:
             raise ValueError(
@@ -158,6 +173,7 @@ class TD3Agent(nn.Module):
             "true_guidance",
             "true_guidance_post_noise",
             "mixed",
+            "random_true_guidance",
         )
         self.config.mixed_guidance_steps = int(max(0, self.config.mixed_guidance_steps))
 
@@ -244,8 +260,9 @@ class TD3Agent(nn.Module):
         self.actor.eval()
         mode = self._resolve_guidance_mode()
         use_gradient_guidance = mode == "critic_guidance"
-        use_true_pre = mode == "true_guidance"
+        use_true_pre = mode in {"true_guidance", "random_true_guidance"}
         use_true_post = mode == "true_guidance_post_noise"
+        use_random_true = mode == "random_true_guidance"
 
         if use_gradient_guidance:
             self.critic.eval()
@@ -254,11 +271,16 @@ class TD3Agent(nn.Module):
         raw_action = self.actor(emb, polygon_state)
         action = raw_action.clone()
 
-        guidance_scale = self._current_guidance_scale()
+        guidance_scale_value = self._current_guidance_scale()
+        if use_random_true:
+            guidance_scale_tensor = torch.rand(action.size(0), device=action.device, dtype=action.dtype).view(-1, 1)
+        else:
+            guidance_scale_tensor = torch.full((action.size(0), 1), guidance_scale_value, device=action.device, dtype=action.dtype)
 
-        if use_true_pre and guidance_scale > 0.0 and guided_targets is not None:
-            tgt = guided_targets.clamp(-1.0, 1.0)
-            action = (raw_action + guidance_scale * (tgt - raw_action)).clamp(-1.0, 1.0)
+        if use_true_pre and guided_targets is not None:
+            if torch.any(guidance_scale_tensor > 0.0):
+                tgt = guided_targets.clamp(-1.0, 1.0)
+                action = (raw_action + guidance_scale_tensor * (tgt - raw_action)).clamp(-1.0, 1.0)
 
         if not deterministic:
             sigma = self._current_exploration_sigma()
@@ -267,21 +289,33 @@ class TD3Agent(nn.Module):
                 noisy_action = action + noise
                 if use_gradient_guidance:
                     noisy_action = self._guided_exploration_adjust(emb, polygon_state, noisy_action, sigma)
-                elif use_true_post and guidance_scale > 0.0 and guided_targets is not None:
-                    tgt = guided_targets.clamp(-1.0, 1.0)
-                    noisy_action = (noisy_action + guidance_scale * (tgt - noisy_action)).clamp(-1.0, 1.0)
+                elif use_true_post and guided_targets is not None:
+                    if torch.any(guidance_scale_tensor > 0.0):
+                        tgt = guided_targets.clamp(-1.0, 1.0)
+                        noisy_action = (noisy_action + guidance_scale_tensor * (tgt - noisy_action)).clamp(-1.0, 1.0)
                 action = noisy_action
             self._interaction_count += embedding.size(0)
         else:
-            if use_true_post and guidance_scale > 0.0 and guided_targets is not None:
-                tgt = guided_targets.clamp(-1.0, 1.0)
-                action = (action + guidance_scale * (tgt - action)).clamp(-1.0, 1.0)
+            if use_true_post and guided_targets is not None:
+                if torch.any(guidance_scale_tensor > 0.0):
+                    tgt = guided_targets.clamp(-1.0, 1.0)
+                    action = (action + guidance_scale_tensor * (tgt - action)).clamp(-1.0, 1.0)
 
         return action.clamp_(-1.0, 1.0)
 
     def update(self, batch: Dict[str, torch.Tensor], weights: Optional[torch.Tensor] = None) -> Dict[str, float | torch.Tensor]:
         self.actor.train()
         self.critic.train()
+
+        # Apply LR schedules (linear decay) using epoch index as progress step
+        if self.config.critic_lr_schedule is not None:
+            lr_c = self._current_lr(self.config.critic_lr_schedule)
+            for g in self.critic_opt.param_groups:
+                g["lr"] = lr_c
+        if self.config.actor_lr_schedule is not None:
+            lr_a = self._current_lr(self.config.actor_lr_schedule)
+            for g in self.actor_opt.param_groups:
+                g["lr"] = lr_a
 
         embedding = batch["embedding"]
         polygon = batch["polygon"]
@@ -346,7 +380,7 @@ class TD3Agent(nn.Module):
                     mse_per_sample = diff.pow(2).mean(dim=-1)
                     weighted_mse = (mse_per_sample * mask).sum() / mask.sum()
                     guided_actor_mse = weighted_mse
-                    actor_loss = actor_loss + self.config.guided_actor_loss_weight * weighted_mse
+                    actor_loss = (actor_loss * (1 - self.config.guided_actor_loss_weight)) + (self.config.guided_actor_loss_weight * weighted_mse)
             self.actor_opt.zero_grad(set_to_none=True)
             actor_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.config.max_grad_norm)
@@ -396,6 +430,16 @@ class TD3Agent(nn.Module):
         progress = min(1.0, progressed / float(steps))
         return float(init + (final - init) * progress)
 
+    def _current_lr(self, schedule: LRScheduleConfig) -> float:
+        """Return current LR under a linear schedule based on epoch index."""
+        step = float(self.current_epoch)
+        steps = max(1.0, float(schedule.steps))
+        progress = min(1.0, max(0.0, step / steps))
+        return float(schedule.lr_init + (schedule.lr_final - schedule.lr_init) * progress)
+
+    def set_epoch(self, epoch: int) -> None:
+        self.current_epoch = max(0, int(epoch))
+
     def _resolve_guidance_mode(self) -> str:
         mode = self.config.guidance_mode
         if mode == "mixed":
@@ -410,12 +454,14 @@ class TD3Agent(nn.Module):
             "true_guidance",
             "true_guidance_post_noise",
             "mixed",
+            "random_true_guidance",
         }
 
     def is_true_guidance_active(self) -> bool:
         return self._resolve_guidance_mode() in {
             "true_guidance",
             "true_guidance_post_noise",
+            "random_true_guidance",
         }
 
     def set_warmup_steps(self, warmup_steps: int) -> None:
