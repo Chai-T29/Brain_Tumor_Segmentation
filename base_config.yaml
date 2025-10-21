@@ -51,7 +51,7 @@ algorithm:
   target_policy_noise_clip: 0.5
   max_grad_norm: 10.0
   embedding_noise_std: 0.02
-  embedding_projected_dim: 512
+  embedding_projected_dim: 256
   pr_alpha: 0.6
   pr_beta_start: 0.4
   pr_beta_steps: 200000
@@ -65,6 +65,7 @@ algorithm:
     steps: 500000
   guided_actor_loss: false
   guided_actor_loss_weight: 0.01
+  use_embedding_pointers: false
   actor_lr_schedule:
     lr_init: 0.0003
     lr_final: 0.00003

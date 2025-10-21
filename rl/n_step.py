@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, List, Tuple
+from typing import Deque, List, Tuple, Any
 
 import torch
 
 
 @dataclass
 class StepTuple:
-    embedding: torch.Tensor
+    embedding: Any
     polygon: torch.Tensor
     action: torch.Tensor
     reward: torch.Tensor
@@ -34,7 +34,7 @@ class NStepAccumulator:
         step: StepTuple,
     ) -> List[
         Tuple[
-            torch.Tensor,
+            Any,
             torch.Tensor,
             torch.Tensor,
             torch.Tensor,
@@ -48,7 +48,7 @@ class NStepAccumulator:
         buffer.append(step)
         transitions: List[
             Tuple[
-                torch.Tensor,
+                Any,
                 torch.Tensor,
                 torch.Tensor,
                 torch.Tensor,
@@ -79,7 +79,7 @@ class NStepAccumulator:
         env_idx: int,
     ) -> List[
         Tuple[
-            torch.Tensor,
+            Any,
             torch.Tensor,
             torch.Tensor,
             torch.Tensor,
@@ -92,7 +92,7 @@ class NStepAccumulator:
         buffer = self.buffers[env_idx]
         transitions: List[
             Tuple[
-                torch.Tensor,
+                Any,
                 torch.Tensor,
                 torch.Tensor,
                 torch.Tensor,
@@ -121,7 +121,7 @@ class NStepAccumulator:
         buffer: Deque[StepTuple],
         allow_partial: bool,
     ) -> Tuple[
-        torch.Tensor,
+        Any,
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,

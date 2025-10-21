@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
-import math
 
 import torch
 import torch.nn as nn
@@ -66,53 +65,7 @@ class TD3Config:
     mixed_guidance_steps: int = 500000
     actor_lr_schedule: Optional[LRScheduleConfig] = None
     critic_lr_schedule: Optional[LRScheduleConfig] = None
-
-
-class EmbeddingProjector(nn.Module):
-    """Learnable sequence of 3x3 convolutions that reduce H×W to 1×1."""
-
-    def __init__(self, in_shape: Tuple[int, int, int], out_dim: int) -> None:
-        super().__init__()
-        channels, height, width = in_shape
-        if height != width:
-            raise ValueError("Embedding map must be square to reduce with 3x3 convolutions.")
-        if height < 1:
-            raise ValueError("Embedding map must have positive spatial dimensions.")
-
-        self.out_dim = int(out_dim)
-        size = int(height)
-        in_channels = int(channels)
-        layers: list[nn.Module] = []
-
-        # Repeatedly apply 3x3 conv (stride 1, no padding) until spatial size reaches 1×1.
-        while size > 1:
-            if size < 3:
-                # Fallback: collapse remaining spatial extent with kernel matching current size.
-                kernel_size = size
-            else:
-                kernel_size = 3
-
-            conv = nn.Conv2d(in_channels, self.out_dim, kernel_size=kernel_size, stride=1, padding=0, bias=True)
-            nn.init.kaiming_normal_(conv.weight, nonlinearity="relu")
-            layers.append(conv)
-            layers.append(nn.ReLU(inplace=True))
-
-            size = size - (kernel_size - 1)
-            if size <= 0:
-                raise ValueError("Convolution stack collapsed spatial dimensions below 1. Check input shape.")
-
-            norm_shape = (self.out_dim, size, size)
-            layers.append(nn.LayerNorm(norm_shape))
-            in_channels = self.out_dim
-
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.dim() != 4:
-            raise ValueError("Expected embedding map with shape [B, C, H, W].")
-        if len(self.net) == 0:
-            return x
-        return self.net(x)
+    use_embedding_pointers: bool = False
 
 
 class TD3Agent(nn.Module):
@@ -125,25 +78,49 @@ class TD3Agent(nn.Module):
         action_dim: int,
         config: TD3Config,
         device: torch.device | None = None,
+        embedding_pointer_mode: bool = False,
     ) -> None:
         super().__init__()
         self.config = config
         self.device = device or torch.device("cpu")
-        channel_dim, _, _ = embedding_shape
-
-        self.embedding_projector = EmbeddingProjector(
-            in_shape=embedding_shape,
-            out_dim=int(config.embedding_projected_dim),
-        ).to(self.device)
-        self.embedding_norm = nn.LayerNorm(int(config.embedding_projected_dim), elementwise_affine=False).to(self.device)
+        self.embedding_shape = tuple(int(v) for v in embedding_shape)
         self.embedding_dim = int(config.embedding_projected_dim)
+        self.use_embedding_pointers = bool(embedding_pointer_mode)
 
-        self.actor = Actor(self.embedding_dim, polygon_dim, action_dim, self.config.actor_hidden_sizes).to(self.device)
-        self.actor_target = Actor(self.embedding_dim, polygon_dim, action_dim, self.config.actor_hidden_sizes).to(self.device)
+        self.actor = Actor(
+            embedding_shape=self.embedding_shape,
+            polygon_dim=polygon_dim,
+            action_dim=action_dim,
+            hidden_sizes=self.config.actor_hidden_sizes,
+            projected_dim=self.embedding_dim,
+            embedding_noise_std=self.config.embedding_noise_std,
+        ).to(self.device)
+        self.actor_target = Actor(
+            embedding_shape=self.embedding_shape,
+            polygon_dim=polygon_dim,
+            action_dim=action_dim,
+            hidden_sizes=self.config.actor_hidden_sizes,
+            projected_dim=self.embedding_dim,
+            embedding_noise_std=self.config.embedding_noise_std,
+        ).to(self.device)
         self.actor_target.load_state_dict(self.actor.state_dict())
 
-        self.critic = Critic(self.embedding_dim, polygon_dim, action_dim, self.config.critic_hidden_sizes).to(self.device)
-        self.critic_target = Critic(self.embedding_dim, polygon_dim, action_dim, self.config.critic_hidden_sizes).to(self.device)
+        self.critic = Critic(
+            embedding_shape=self.embedding_shape,
+            polygon_dim=polygon_dim,
+            action_dim=action_dim,
+            hidden_sizes=self.config.critic_hidden_sizes,
+            projected_dim=self.embedding_dim,
+            embedding_noise_std=self.config.embedding_noise_std,
+        ).to(self.device)
+        self.critic_target = Critic(
+            embedding_shape=self.embedding_shape,
+            polygon_dim=polygon_dim,
+            action_dim=action_dim,
+            hidden_sizes=self.config.critic_hidden_sizes,
+            projected_dim=self.embedding_dim,
+            embedding_noise_std=self.config.embedding_noise_std,
+        ).to(self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
 
         self.actor_opt = optim.Adam(self.actor.parameters(), lr=config.actor_lr)
@@ -186,30 +163,9 @@ class TD3Agent(nn.Module):
             self.device = device_arg
         return module
 
-    def preprocess_embeddings(self, embedding_map: torch.Tensor) -> torch.Tensor:
-        """Project encoder feature maps into a compact vector representation."""
-        if embedding_map.dim() != 4:
-            raise ValueError("Expected embedding map with shape [B, C, H, W].")
-        embedding_map = embedding_map.to(self.device)
-        projected_map = self.embedding_projector(embedding_map)
-        flattened = projected_map.flatten(start_dim=1)
-        normalized = self.embedding_norm(flattened)
-        return normalized
-
-    def _augment_embedding(self, embedding: torch.Tensor) -> torch.Tensor:
-        if self.config.embedding_noise_std <= 0:
-            return embedding
-        if embedding.dim() != 2:
-            raise ValueError("Expected embedding tensor with shape [B, D].")
-        batch, dim = embedding.shape
-        base = embedding.view(batch, dim, 1, 1)
-        noise = torch.randn_like(base) * self.config.embedding_noise_std
-        perturbed = base + noise
-        return perturbed.view(batch, dim)
-
     def _guided_exploration_adjust(
         self,
-        embedding: torch.Tensor,
+        embedding_map: torch.Tensor,
         polygon_state: torch.Tensor,
         noisy_action: torch.Tensor,
         sigma: float
@@ -223,13 +179,15 @@ class TD3Agent(nn.Module):
         if guidance_scale <= 0.0:
             return noisy_action
 
-        emb = embedding.detach()
-        poly = polygon_state.detach()
+        poly = polygon_state.to(self.device).detach()
+        embedding_map = embedding_map.to(self.device).detach()
 
         with torch.enable_grad():
             action_var = noisy_action.detach().clone().requires_grad_(True)
-            q1, q2 = self.critic(emb, poly, action_var)
-            q_min = torch.minimum(q1, q2)
+            encoded_q1 = self.critic.encode_q1(embedding_map, apply_noise=False)
+            encoded_q1 = encoded_q1.detach()
+            q1 = self.critic.q1_forward_from_encoded(encoded_q1, poly, action_var)
+            q_min = q1
             grad = torch.autograd.grad(q_min.sum(), action_var, retain_graph=False, allow_unused=False)[0]
 
         if grad is None:
@@ -242,8 +200,8 @@ class TD3Agent(nn.Module):
 
         with torch.no_grad():
             q_min_original = q_min.detach()
-            q1_new, q2_new = self.critic(emb, poly, candidate_action)
-            q_min_new = torch.minimum(q1_new, q2_new)
+            q1_new = self.critic.q1_forward_from_encoded(encoded_q1, poly, candidate_action)
+            q_min_new = q1_new
 
         improved = (q_min_new > q_min_original).view(-1, 1)
         return torch.where(improved, candidate_action, noisy_action)
@@ -264,23 +222,27 @@ class TD3Agent(nn.Module):
         use_true_post = mode == "true_guidance_post_noise"
         use_random_true = mode == "random_true_guidance"
 
+        embedding = embedding.to(self.device)
+        polygon_state = polygon_state.to(self.device)
+
         if use_gradient_guidance:
             self.critic.eval()
 
-        emb = self._augment_embedding(embedding) if apply_embedding_noise else embedding
-        raw_action = self.actor(emb, polygon_state)
-        action = raw_action.clone()
+        encoded = self.actor.encode(embedding, apply_noise=apply_embedding_noise)
+        action = self.actor.forward_from_encoded(encoded, polygon_state)
 
         guidance_scale_value = self._current_guidance_scale()
-        if use_random_true:
-            guidance_scale_tensor = torch.rand(action.size(0), device=action.device, dtype=action.dtype).view(-1, 1)
-        else:
-            guidance_scale_tensor = torch.full((action.size(0), 1), guidance_scale_value, device=action.device, dtype=action.dtype)
+        guidance_scale_tensor: Optional[torch.Tensor] = None
+        if (use_true_pre or use_true_post or use_random_true) and guided_targets is not None:
+            if use_random_true:
+                guidance_scale_tensor = torch.rand(action.size(0), device=action.device, dtype=action.dtype).view(-1, 1)
+            else:
+                guidance_scale_tensor = torch.full((action.size(0), 1), guidance_scale_value, device=action.device, dtype=action.dtype)
 
-        if use_true_pre and guided_targets is not None:
+        if use_true_pre and guided_targets is not None and guidance_scale_tensor is not None:
             if torch.any(guidance_scale_tensor > 0.0):
-                tgt = guided_targets.clamp(-1.0, 1.0)
-                action = (raw_action + guidance_scale_tensor * (tgt - raw_action)).clamp(-1.0, 1.0)
+                tgt = guided_targets.to(action.device).clamp(-1.0, 1.0)
+                action = (action + guidance_scale_tensor * (tgt - action)).clamp(-1.0, 1.0)
 
         if not deterministic:
             sigma = self._current_exploration_sigma()
@@ -288,17 +250,17 @@ class TD3Agent(nn.Module):
                 noise = torch.randn_like(action) * sigma
                 noisy_action = action + noise
                 if use_gradient_guidance:
-                    noisy_action = self._guided_exploration_adjust(emb, polygon_state, noisy_action, sigma)
-                elif use_true_post and guided_targets is not None:
+                    noisy_action = self._guided_exploration_adjust(embedding, polygon_state, noisy_action, sigma)
+                elif use_true_post and guided_targets is not None and guidance_scale_tensor is not None:
                     if torch.any(guidance_scale_tensor > 0.0):
-                        tgt = guided_targets.clamp(-1.0, 1.0)
+                        tgt = guided_targets.to(action.device).clamp(-1.0, 1.0)
                         noisy_action = (noisy_action + guidance_scale_tensor * (tgt - noisy_action)).clamp(-1.0, 1.0)
                 action = noisy_action
             self._interaction_count += embedding.size(0)
         else:
-            if use_true_post and guided_targets is not None:
+            if use_true_post and guided_targets is not None and guidance_scale_tensor is not None:
                 if torch.any(guidance_scale_tensor > 0.0):
-                    tgt = guided_targets.clamp(-1.0, 1.0)
+                    tgt = guided_targets.to(action.device).clamp(-1.0, 1.0)
                     action = (action + guidance_scale_tensor * (tgt - action)).clamp(-1.0, 1.0)
 
         return action.clamp_(-1.0, 1.0)
@@ -317,32 +279,30 @@ class TD3Agent(nn.Module):
             for g in self.actor_opt.param_groups:
                 g["lr"] = lr_a
 
-        embedding = batch["embedding"]
-        polygon = batch["polygon"]
-        action = batch["action"]
-        reward = batch["reward"]
-        discount = batch["discount"]
-        next_polygon = batch["next_polygon"]
+        embedding_map = batch["embedding"].to(self.device)
+        polygon = batch["polygon"].to(self.device)
+        action = batch["action"].to(self.device)
+        reward = batch["reward"].to(self.device)
+        discount = batch["discount"].to(self.device)
+        next_polygon = batch["next_polygon"].to(self.device)
         if weights is None:
             weights = torch.ones_like(reward)
         if weights.dim() == 1:
             weights = weights.view(-1, 1)
-        weights = weights.to(embedding.device)
+        weights = weights.to(self.device)
 
         # Critics update -----------------------------------------------------
-        emb_aug = self._augment_embedding(embedding)
-        current_q1, current_q2 = self.critic(emb_aug, polygon, action)
+        current_q1, current_q2 = self.critic.forward(embedding_map, polygon, action, apply_noise=True)
 
         with torch.no_grad():
-            next_emb_aug = self._augment_embedding(embedding)
-            target_action = self.actor_target(next_emb_aug, next_polygon)
+            target_action = self.actor_target.forward(embedding_map, next_polygon, apply_noise=True)
             if self.config.target_policy_noise_std > 0:
                 noise = torch.randn_like(target_action) * self.config.target_policy_noise_std
                 noise = noise.clamp_(-self.config.target_policy_noise_clip, self.config.target_policy_noise_clip)
                 target_action = target_action + noise
             target_action = target_action.clamp(-1.0, 1.0)
 
-            target_q1, target_q2 = self.critic_target(next_emb_aug, next_polygon, target_action)
+            target_q1, target_q2 = self.critic_target.forward(embedding_map, next_polygon, target_action, apply_noise=True)
             target_q = torch.min(target_q1, target_q2)
             target_value = reward + discount * target_q
 
@@ -361,18 +321,29 @@ class TD3Agent(nn.Module):
         update_actor = (self.total_updates + 1) % max(1, self.config.policy_delay) == 0
         actor_loss_value: Optional[float] = None
         guided_target = batch.get("guided_target")
+        if guided_target is not None:
+            guided_target = guided_target.to(self.device)
         guided_available = batch.get("guided_available")
+        if guided_available is not None:
+            guided_available = guided_available.to(self.device)
 
         guided_actor_mse: Optional[torch.Tensor] = None
 
+        skip_guided_loss = False
+        if self.config.guidance_mode == "mixed" and self._interaction_count >= self.config.mixed_guidance_steps:
+            skip_guided_loss = True
+
         if update_actor:
-            actor_action = self.actor(emb_aug, polygon)
-            actor_loss = -self.critic.q1_forward(emb_aug, polygon, actor_action).mean()
+            actor_encoded = self.actor.encode(embedding_map, apply_noise=True)
+            actor_action = self.actor.forward_from_encoded(actor_encoded, polygon)
+            critic_encoded_q1 = self.critic.encode_q1(embedding_map, apply_noise=True)
+            actor_loss = -self.critic.q1_forward_from_encoded(critic_encoded_q1, polygon, actor_action).mean()
 
             if (
                 self.config.guided_actor_loss
                 and guided_target is not None
                 and guided_available is not None
+                and not skip_guided_loss
             ):
                 mask = guided_available.view(-1)
                 if mask.sum() > 0:
@@ -380,7 +351,7 @@ class TD3Agent(nn.Module):
                     mse_per_sample = diff.pow(2).mean(dim=-1)
                     weighted_mse = (mse_per_sample * mask).sum() / mask.sum()
                     guided_actor_mse = weighted_mse
-                    actor_loss = (actor_loss * (1 - self.config.guided_actor_loss_weight)) + (self.config.guided_actor_loss_weight * weighted_mse)
+                    actor_loss = actor_loss + (self.config.guided_actor_loss_weight * weighted_mse)
             self.actor_opt.zero_grad(set_to_none=True)
             actor_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.config.max_grad_norm)

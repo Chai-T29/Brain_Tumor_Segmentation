@@ -117,19 +117,21 @@ class TD3Lightning(pl.LightningModule):
             polygon_dim=polygon_dim,
             action_dim=self.environment.action_dim,
             config=self.algo_config,
+            embedding_pointer_mode=self.algo_config.use_embedding_pointers,
         )
         self.agent.set_warmup_steps(self.training_config.warmup_steps)
 
-        self.embedding_dim = self.agent.embedding_dim
+        self.embedding_shape = self.agent.embedding_shape
         self.replay = ReplayBuffer(
             capacity=replay_capacity,
-            embedding_dim=self.embedding_dim,
+            embedding_shape=self.embedding_shape,
             polygon_dim=polygon_dim,
             action_dim=self.environment.action_dim,
             alpha=self.algo_config.pr_alpha,
             beta_start=self.algo_config.pr_beta_start,
             beta_steps=self.algo_config.pr_beta_steps,
             eps=self.algo_config.pr_eps,
+            use_embedding_pointers=self.algo_config.use_embedding_pointers,
         )
         self._global_step_interactions = 0
 
@@ -152,9 +154,15 @@ class TD3Lightning(pl.LightningModule):
         actor_state = checkpoint.get("actor_opt_state")
         critic_state = checkpoint.get("critic_opt_state")
         if actor_state is not None:
-            self.agent.actor_opt.load_state_dict(actor_state)
+            try:
+                self.agent.actor_opt.load_state_dict(actor_state)
+            except ValueError:
+                print("[Warning] Actor optimizer state did not match current architecture; skipping load.")
         if critic_state is not None:
-            self.agent.critic_opt.load_state_dict(critic_state)
+            try:
+                self.agent.critic_opt.load_state_dict(critic_state)
+            except ValueError:
+                print("[Warning] Critic optimizer state did not match current architecture; skipping load.")
 
     def configure_optimizers(self):
         # Optimisers are managed internally by the agent.
@@ -167,9 +175,55 @@ class TD3Lightning(pl.LightningModule):
         batch_size = images.size(0)
 
         embedding_maps = batch["embedding"].to(self.device, non_blocking=True)
-        with torch.no_grad():
-            embeddings = self.agent.preprocess_embeddings(embedding_maps)
-        embeddings_cpu = embeddings.detach().cpu()
+        meta_batch = batch.get("meta")
+        if isinstance(meta_batch, list):
+            processed_meta: Dict[str, list] = {}
+            for item in meta_batch:
+                if isinstance(item, dict):
+                    for key, value in item.items():
+                        processed_meta.setdefault(key, []).append(value)
+            meta_batch = processed_meta
+        pointer_enabled = getattr(self.replay, "use_embedding_pointers", False)
+        embedding_maps_cpu = None if pointer_enabled else embedding_maps.detach().cpu()
+
+        def _resolve_meta_value(container, idx: int):
+            if container is None:
+                return None
+            value = container
+            if isinstance(value, (list, tuple)):
+                if idx >= len(value):
+                    return None
+                value = value[idx]
+            elif isinstance(value, np.ndarray):
+                if value.size == 0:
+                    return None
+                value = value[idx]
+            elif torch.is_tensor(value):
+                if value.numel() == 0:
+                    return None
+                elem = value[idx]
+                if elem.numel() == 1:
+                    return elem.item()
+                return elem.item()
+            return value
+
+        def _embedding_reference(idx: int):
+            if not pointer_enabled:
+                if embedding_maps_cpu is None:
+                    raise RuntimeError("embedding_maps_cpu unavailable for pointer-disabled mode.")
+                return embedding_maps_cpu[idx]
+            if not isinstance(meta_batch, dict):
+                return embedding_maps[idx].detach().cpu()
+            path = meta_batch.get("embedding_mm_path")
+            if path is None:
+                path = meta_batch.get("embedding_path")
+            slice_val = meta_batch.get("slice_index")
+            path_resolved = _resolve_meta_value(path, idx)
+            if path_resolved is None:
+                return embedding_maps[idx].detach().cpu()
+            slice_resolved = _resolve_meta_value(slice_val, idx)
+            slice_resolved = int(slice_resolved) if slice_resolved is not None else 0
+            return {"path": str(path_resolved), "slice_index": slice_resolved}
 
         target_polygon_cpu = batch.get("target_polygon_state")
         target_polygon = None
@@ -286,19 +340,20 @@ class TD3Lightning(pl.LightningModule):
             base_policy_actions = None
             if active_indices.numel() > 0:
                 with torch.no_grad():
-                    base_policy_actions = self.agent.actor(
-                        embeddings[active_indices],
+                    base_policy_actions = self.agent.actor.forward(
+                        embedding_maps[active_indices],
                         polygon_state[active_indices],
+                        apply_noise=False,
                     )
                     base_action_norm_total += float(base_policy_actions.norm(dim=-1).sum().item())
                     base_action_count += int(base_policy_actions.size(0))
 
                 chosen_actions = self.agent.act(
-                embeddings[active_indices],
-                polygon_state[active_indices],
-                deterministic=False,
-                apply_embedding_noise=not self.agent.is_true_guidance_active(),
-                guided_targets=guided_subset,
+                    embedding_maps[active_indices],
+                    polygon_state[active_indices],
+                    deterministic=False,
+                    apply_embedding_noise=not self.agent.is_true_guidance_active(),
+                    guided_targets=guided_subset,
                 )
                 actions[active_indices] = chosen_actions
             actions_cpu = actions.detach().cpu()
@@ -363,7 +418,7 @@ class TD3Lightning(pl.LightningModule):
                 if guidance_targets_full is not None:
                     guidance_tensor = guidance_targets_full[env_idx].detach().cpu()
                 step_tuple = StepTuple(
-                    embedding=embeddings_cpu[env_idx],
+                    embedding=_embedding_reference(env_idx),
                     polygon=prev_polygon_cpu[env_idx],
                     action=actions_cpu[env_idx],
                     reward=reward_tensor,
@@ -689,8 +744,12 @@ class TD3Lightning(pl.LightningModule):
         images = batch["image"].to(self.device, non_blocking=True)
         masks = batch["mask"].to(self.device, non_blocking=True)
         embedding_maps = batch["embedding"].to(self.device, non_blocking=True)
-        with torch.no_grad():
-            embeddings = self.agent.preprocess_embeddings(embedding_maps)
+        target_polygon = None
+        target_polygon_batch = batch.get("target_polygon_state")
+        if target_polygon_batch is not None:
+            target_polygon = target_polygon_batch.to(self.device, dtype=torch.float32)
+        elif self.agent.requires_guided_targets:
+            raise RuntimeError("Guided targets required by selected mode but not provided in dataset batch.")
 
         state_cpu = env.reset(images.cpu(), masks.cpu())
         state = state_cpu.to(self.device)
@@ -715,11 +774,28 @@ class TD3Lightning(pl.LightningModule):
 
             actions = torch.zeros(batch_size, env.action_dim, device=self.device)
             active_indices = active_mask.nonzero(as_tuple=False).squeeze(1)
+
+            guidance_targets_full = None
+            if target_polygon is not None and active_indices.numel() > 0:
+                current_iou = None
+                if env.last_iou is not None:
+                    current_iou = env.last_iou.detach().to(self.device, dtype=state.dtype)
+                guidance_targets_full = self._compute_true_guidance_targets(
+                    state,
+                    target_polygon,
+                    current_iou=current_iou,
+                )
+
+            guided_subset = None
+            if guidance_targets_full is not None and active_indices.numel() > 0:
+                guided_subset = guidance_targets_full[active_indices]
+
             selected_actions = self.agent.act(
-                embeddings[active_indices],
+                embedding_maps[active_indices],
                 state[active_indices],
                 deterministic=deterministic,
                 apply_embedding_noise=False,
+                guided_targets=guided_subset,
             )
             actions[active_indices] = selected_actions
 

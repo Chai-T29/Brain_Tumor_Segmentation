@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Sequence
 
 import torch
+import numpy as np
 
 
 @dataclass
 class Transition:
-    embedding: torch.Tensor
+    embedding: torch.Tensor | Sequence[float] | Dict[str, float] | None
     polygon_state: torch.Tensor
     action: torch.Tensor
     reward: torch.Tensor
@@ -19,12 +20,12 @@ class Transition:
 
 
 class ReplayBuffer:
-    """Prioritised replay buffer that stores tensors on CPU for fast sampling."""
+    """Prioritised replay buffer that stores embedding maps and polygon states on CPU."""
 
     def __init__(
         self,
         capacity: int,
-        embedding_dim: int,
+        embedding_shape: tuple[int, int, int],
         polygon_dim: int,
         action_dim: int,
         alpha: float,
@@ -32,14 +33,15 @@ class ReplayBuffer:
         beta_steps: int,
         eps: float,
         device: torch.device | None = None,
+        use_embedding_pointers: bool = False,
     ) -> None:
         if capacity <= 0:
             raise ValueError("capacity must be positive.")
-        if embedding_dim <= 0:
-            raise ValueError("embedding_dim must be positive.")
+        if len(embedding_shape) != 3:
+            raise ValueError("embedding_shape must be a tuple of (C, H, W).")
 
         self.capacity = capacity
-        self.embedding_dim = embedding_dim
+        self.embedding_shape = tuple(int(v) for v in embedding_shape)
         self.polygon_dim = polygon_dim
         self.action_dim = action_dim
         self.device = device or torch.device("cpu")
@@ -50,7 +52,11 @@ class ReplayBuffer:
         self.beta = self.beta_start
         self.pr_eps = float(eps)
 
-        self.embeddings = torch.zeros((capacity, embedding_dim), dtype=torch.float32)
+        self.use_embedding_pointers = bool(use_embedding_pointers)
+        if self.use_embedding_pointers:
+            self.embeddings = [None] * capacity  # type: ignore[assignment]
+        else:
+            self.embeddings = torch.zeros((capacity, *self.embedding_shape), dtype=torch.float32)
         self.polygons = torch.zeros((capacity, polygon_dim), dtype=torch.float32)
         self.actions = torch.zeros((capacity, action_dim), dtype=torch.float32)
         self.rewards = torch.zeros((capacity, 1), dtype=torch.float32)
@@ -71,7 +77,12 @@ class ReplayBuffer:
     def add(self, transition: Transition) -> None:
         idx = self._position
 
-        self.embeddings[idx].copy_(transition.embedding.detach().to(dtype=torch.float32, device="cpu"))
+        if self.use_embedding_pointers:
+            self.embeddings[idx] = transition.embedding
+        else:
+            if transition.embedding is None:
+                raise ValueError("Embedding tensor required when use_embedding_pointers is False.")
+            self.embeddings[idx].copy_(transition.embedding.detach().to(dtype=torch.float32, device="cpu"))
         self.polygons[idx].copy_(transition.polygon_state.detach().to(dtype=torch.float32, device="cpu"))
         self.actions[idx].copy_(transition.action.detach().to(dtype=torch.float32, device="cpu"))
         self.rewards[idx].copy_(transition.reward.detach().view(1).to(dtype=torch.float32, device="cpu"))
@@ -127,8 +138,41 @@ class ReplayBuffer:
         weights = weights.to(dtype=torch.float32, device=target_device)
         self.beta = min(1.0, self.beta + self.beta_increment)
 
+        if self.use_embedding_pointers:
+            emb_list = []
+            for ptr in (self.embeddings[i] for i in indices):
+                if isinstance(ptr, torch.Tensor):
+                    emb_list.append(ptr.to(target_device, dtype=torch.float32))
+                elif isinstance(ptr, np.ndarray):
+                    # Make a writable copy to avoid PyTorch warning on non-writable views
+                    np_copy = np.array(ptr, dtype=np.float32, copy=True)
+                    emb_list.append(torch.from_numpy(np_copy).to(target_device))
+                elif isinstance(ptr, dict):
+                    path = ptr.get("path")
+                    slice_idx = int(ptr.get("slice_index", 0))
+                    if path is None:
+                        raise ValueError("Embedding pointer missing 'path'.")
+                    arr = np.load(path, mmap_mode="r")
+                    # Create a writable copy from the memmap slice
+                    np_copy = np.array(arr[slice_idx], dtype=np.float32, copy=True)
+                    emb = torch.from_numpy(np_copy).to(target_device)
+                    emb_list.append(emb)
+                elif isinstance(ptr, (tuple, list)):
+                    if len(ptr) < 2:
+                        raise ValueError("Embedding pointer sequence must contain (path, slice_index).")
+                    path, slice_idx = ptr[0], int(ptr[1])
+                    arr = np.load(str(path), mmap_mode="r")
+                    np_copy = np.array(arr[slice_idx], dtype=np.float32, copy=True)
+                    emb = torch.from_numpy(np_copy).to(target_device)
+                    emb_list.append(emb)
+                else:
+                    raise ValueError("Unsupported embedding pointer type.")
+            embedding_batch = torch.stack(emb_list, dim=0)
+        else:
+            embedding_batch = self.embeddings[indices].to(target_device)
+
         batch = {
-            "embedding": self.embeddings[indices].to(target_device),
+            "embedding": embedding_batch,
             "polygon": self.polygons[indices].to(target_device),
             "action": self.actions[indices].to(target_device),
             "reward": self.rewards[indices].to(target_device),

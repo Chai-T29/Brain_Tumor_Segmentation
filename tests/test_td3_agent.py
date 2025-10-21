@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 
 from rl.agent import TD3Agent, TD3Config, NoiseScheduleConfig
 from rl.lightning_module import TD3Lightning
@@ -16,6 +17,7 @@ def test_td3_agent_action_bounds():
         embedding_noise_std=0.0,
         embedding_projected_dim=4,
     )
+    config.guidance_mode = "critic_guidance"
     agent = TD3Agent(
         embedding_shape=(1, 2, 2),
         polygon_dim=6,
@@ -23,7 +25,7 @@ def test_td3_agent_action_bounds():
         config=config,
         device=torch.device("cpu"),
     )
-    embedding = torch.randn(3, agent.embedding_dim)
+    embedding = torch.randn(3, *agent.embedding_shape)
     polygon_state = torch.randn(3, 6)
 
     action = agent.act(embedding, polygon_state, deterministic=False)
@@ -49,7 +51,7 @@ def test_td3_agent_action_bounds():
 def test_replay_buffer_sample_shapes():
     buffer = ReplayBuffer(
         capacity=10,
-        embedding_dim=4,
+        embedding_shape=(1, 2, 2),
         polygon_dim=6,
         action_dim=7,
         alpha=0.6,
@@ -60,7 +62,7 @@ def test_replay_buffer_sample_shapes():
 
     for _ in range(6):
         transition = Transition(
-            embedding=torch.randn(4),
+            embedding=torch.randn(1, 2, 2),
             polygon_state=torch.randn(6),
             action=torch.tanh(torch.randn(7)),
             reward=torch.tensor([0.5]),
@@ -71,7 +73,7 @@ def test_replay_buffer_sample_shapes():
         buffer.add(transition)
 
     batch, indices, weights = buffer.sample(batch_size=4)
-    assert batch["embedding"].shape == (4, 4)
+    assert batch["embedding"].shape == (4, 1, 2, 2)
     assert batch["polygon"].shape == (4, 6)
     assert batch["action"].shape == (4, 7)
     assert batch["reward"].shape == (4, 1)
@@ -80,6 +82,40 @@ def test_replay_buffer_sample_shapes():
     assert batch["done"].shape == (4, 1)
     assert indices.shape[0] == 4
     assert weights.shape[0] == 4
+
+
+def test_replay_buffer_pointer_mode(tmp_path):
+    buffer = ReplayBuffer(
+        capacity=4,
+        embedding_shape=(1, 2, 2),
+        polygon_dim=6,
+        action_dim=7,
+        alpha=0.6,
+        beta_start=0.4,
+        beta_steps=1000,
+        eps=1e-6,
+        use_embedding_pointers=True,
+    )
+
+    ptr_path = tmp_path / "embeddings.npy"
+    data = np.random.randn(5, 1, 2, 2).astype(np.float32)
+    np.save(ptr_path, data)
+
+    pointer = {"path": str(ptr_path), "slice_index": 0}
+
+    transition = Transition(
+        embedding=pointer,
+        polygon_state=torch.zeros(6),
+        action=torch.zeros(7),
+        reward=torch.tensor([0.0]),
+        discount=torch.tensor([0.99]),
+        next_polygon_state=torch.zeros(6),
+        done=torch.tensor([0.0]),
+    )
+    buffer.add(transition)
+
+    batch, _, _ = buffer.sample(batch_size=1)
+    assert batch["embedding"].shape == (1, 1, 2, 2)
 
 
 def test_warmup_keeps_sigma_constant():
