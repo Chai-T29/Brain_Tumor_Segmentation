@@ -107,6 +107,13 @@ class TD3Lightning(pl.LightningModule):
     def on_save_checkpoint(self, checkpoint: Dict[str, any]) -> None:
         checkpoint["actor_opt_state"] = self.agent.actor_opt.state_dict()
         checkpoint["critic_opt_state"] = self.agent.critic_opt.state_dict()
+        checkpoint["replay_buffer_state"] = self.replay.state_dict()
+        checkpoint["agent_tracking_state"] = {
+            "total_updates": int(self.agent.total_updates),
+            "interaction_count": int(self.agent._interaction_count),
+            "last_guidance_scale": float(self.agent._last_guidance_scale),
+        }
+        checkpoint["global_step_interactions"] = int(self._global_step_interactions)
 
     def on_load_checkpoint(self, checkpoint: Dict[str, any]) -> None:
         actor_state = checkpoint.get("actor_opt_state")
@@ -115,6 +122,31 @@ class TD3Lightning(pl.LightningModule):
             self.agent.actor_opt.load_state_dict(actor_state)
         if critic_state is not None:
             self.agent.critic_opt.load_state_dict(critic_state)
+
+        replay_state = checkpoint.get("replay_buffer_state")
+        if replay_state is not None:
+            try:
+                self.replay.load_state_dict(replay_state)
+            except ValueError as exc:
+                if self.verbose:
+                    print(f"[Verbose] Replay buffer reload skipped: {exc}")
+
+        agent_state = checkpoint.get("agent_tracking_state") or checkpoint.get("agent_state")
+        if agent_state:
+            total_updates = agent_state.get("total_updates")
+            interaction_count = agent_state.get("interaction_count")
+            last_guidance_scale = agent_state.get("last_guidance_scale")
+            if total_updates is not None:
+                self.agent.total_updates = int(total_updates)
+            if interaction_count is not None:
+                self.agent._interaction_count = int(interaction_count)
+            if last_guidance_scale is not None:
+                self.agent._last_guidance_scale = float(last_guidance_scale)
+
+        global_steps = checkpoint.get("global_step_interactions")
+        if global_steps is not None:
+            self._global_step_interactions = int(global_steps)
+
 
     def configure_optimizers(self):
         # Optimisers are managed internally by the agent.

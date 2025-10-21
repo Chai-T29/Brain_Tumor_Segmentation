@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict
+from typing import Any, Dict
 
 import torch
 
@@ -151,3 +151,120 @@ class ReplayBuffer:
         current_max = float(self.priorities[: self._size].max().item())
         if current_max > 0:
             self._max_priority = current_max
+
+    def state_dict(self) -> Dict[str, Any]:
+        """Return a CPU-friendly snapshot of the replay buffer."""
+        state: Dict[str, Any] = {
+            "capacity": self.capacity,
+            "embedding_dim": self.embedding_dim,
+            "polygon_dim": self.polygon_dim,
+            "action_dim": self.action_dim,
+            "alpha": self.alpha,
+            "beta_start": self.beta_start,
+            "beta_steps": self.beta_steps,
+            "beta_increment": self.beta_increment,
+            "beta": self.beta,
+            "eps": self.pr_eps,
+            "position": self._position,
+            "size": self._size,
+            "max_priority": self._max_priority,
+            "device": str(self.device),
+        }
+
+        size = int(self._size)
+        tensors = {
+            "embeddings": self.embeddings[:size],
+            "polygons": self.polygons[:size],
+            "actions": self.actions[:size],
+            "rewards": self.rewards[:size],
+            "discounts": self.discounts[:size],
+            "next_polygons": self.next_polygons[:size],
+            "dones": self.dones[:size],
+            "guidance_targets": self.guidance_targets[:size],
+            "guidance_mask": self.guidance_mask[:size],
+            "priorities": self.priorities[:size],
+        }
+
+        for key, tensor in tensors.items():
+            state[key] = tensor.clone()
+
+        return state
+
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        """Restore replay buffer tensors and book-keeping from a snapshot."""
+        if not state:
+            return
+
+        capacity = int(state.get("capacity", self.capacity))
+        embedding_dim = int(state.get("embedding_dim", self.embedding_dim))
+        polygon_dim = int(state.get("polygon_dim", self.polygon_dim))
+        action_dim = int(state.get("action_dim", self.action_dim))
+
+        if (
+            capacity != self.capacity
+            or embedding_dim != self.embedding_dim
+            or polygon_dim != self.polygon_dim
+            or action_dim != self.action_dim
+        ):
+            raise ValueError(
+                "ReplayBuffer configuration mismatch while loading checkpoint: "
+                f"expected (cap={self.capacity}, emb={self.embedding_dim}, poly={self.polygon_dim}, act={self.action_dim}) "
+                f"but received (cap={capacity}, emb={embedding_dim}, poly={polygon_dim}, act={action_dim})."
+            )
+
+        device = state.get("device")
+        if device is not None:
+            try:
+                self.device = torch.device(device)
+            except Exception:
+                self.device = torch.device("cpu")
+
+        tensors = {
+            "embeddings": self.embeddings,
+            "polygons": self.polygons,
+            "actions": self.actions,
+            "rewards": self.rewards,
+            "discounts": self.discounts,
+            "next_polygons": self.next_polygons,
+            "dones": self.dones,
+            "guidance_targets": self.guidance_targets,
+            "guidance_mask": self.guidance_mask,
+            "priorities": self.priorities,
+        }
+
+        saved_size = int(state.get("size", 0))
+        active_size = min(saved_size, self.capacity)
+
+        for key, tensor in tensors.items():
+            saved = state.get(key)
+            tensor.zero_()
+            if saved is None:
+                continue
+            if isinstance(saved, torch.Tensor):
+                saved_tensor = saved.to(dtype=tensor.dtype, device="cpu")
+            else:
+                saved_tensor = torch.as_tensor(saved, dtype=tensor.dtype)
+            length = min(active_size, saved_tensor.shape[0])
+            if length > 0:
+                tensor[:length].copy_(saved_tensor[:length])
+
+        self.alpha = float(state.get("alpha", self.alpha))
+        self.beta_start = float(state.get("beta_start", self.beta_start))
+        self.beta_steps = max(1, int(state.get("beta_steps", self.beta_steps)))
+        self.beta_increment = float(state.get("beta_increment", self.beta_increment))
+        self.beta = float(state.get("beta", self.beta))
+        self.pr_eps = float(state.get("eps", self.pr_eps))
+        self._position = int(state.get("position", active_size)) % self.capacity
+        self._size = active_size
+        self._max_priority = float(state.get("max_priority", 1.0))
+
+        if self._size > 0:
+            current_max = float(self.priorities[: self._size].max().item())
+            if current_max > 0:
+                self._max_priority = current_max
+        else:
+            self._position = 0
+            self._max_priority = 1.0
+
+        self.beta = max(self.beta_start, min(1.0, self.beta))
+
