@@ -60,7 +60,7 @@ class TD3Config:
     guidance_schedule: GuidanceScheduleConfig = field(default_factory=GuidanceScheduleConfig)
     guided_actor_loss: bool = False
     guided_actor_loss_weight: float = 0.01
-    # guidance_mode options: "critic_guidance", "true_guidance", "mixed", "true_guidance_post_noise", "random_true_guidance"
+    # guidance_mode options: "critic_guidance", "true_guidance", "mixed", "true_guidance_post_noise", "random_true_guidance", "none"
     guidance_mode: str = "true_guidance"
     mixed_guidance_steps: int = 500000
     actor_lr_schedule: Optional[LRScheduleConfig] = None
@@ -138,11 +138,12 @@ class TD3Agent(nn.Module):
             "mixed",
             "true_guidance_post_noise",
             "random_true_guidance",
+            "none",
         }
         if normalized_mode not in valid_modes:
             raise ValueError(
                 "guidance_mode must be one of 'critic_guidance', 'true_guidance', "
-                "'mixed', or 'true_guidance_post_noise'."
+                "'mixed', 'true_guidance_post_noise', 'random_true_guidance', or 'none'."
             )
         self.config.guidance_mode = normalized_mode
         self.config.guided_exploration = normalized_mode in ("critic_guidance", "mixed")

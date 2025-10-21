@@ -353,7 +353,9 @@ class TD3Lightning(pl.LightningModule):
             actions = torch.zeros(batch_size, self.environment.action_dim, device=self.device)
 
             guidance_targets_full = None
-            if target_polygon is not None:
+            if target_polygon is not None and (
+                self.agent.requires_guided_targets or self.agent.is_true_guidance_active()
+            ):
                 current_iou = None
                 if self.environment.last_iou is not None:
                     current_iou = self.environment.last_iou.detach().to(self.device, dtype=polygon_state.dtype)
@@ -826,7 +828,11 @@ class TD3Lightning(pl.LightningModule):
             active_indices = active_mask.nonzero(as_tuple=False).squeeze(1)
 
             guidance_targets_full = None
-            if target_polygon is not None and active_indices.numel() > 0:
+            if (
+                target_polygon is not None
+                and active_indices.numel() > 0
+                and (self.agent.requires_guided_targets or self.agent.is_true_guidance_active())
+            ):
                 current_iou = None
                 if env.last_iou is not None:
                     current_iou = env.last_iou.detach().to(self.device, dtype=state.dtype)

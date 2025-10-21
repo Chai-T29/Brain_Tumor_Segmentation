@@ -179,3 +179,28 @@ def test_guidance_targets_match_action_layout():
     expected_center = torch.zeros(2, dtype=guidance.dtype)
     assert torch.allclose(guidance[0, num_lines * 2 : num_lines * 2 + 2], expected_center, atol=1e-5)
     assert torch.isclose(guidance[0, -1], torch.tensor(-1.0, dtype=guidance.dtype))
+
+
+def test_guidance_mode_none_requires_no_targets():
+    config = TD3Config(
+        guidance_mode="none",
+        exploration_noise=NoiseScheduleConfig(sigma_init=0.0, sigma_final=0.0, steps=1),
+        embedding_noise_std=0.0,
+        embedding_projected_dim=4,
+        actor_hidden_sizes=(8,),
+        critic_hidden_sizes=(8,),
+    )
+    agent = TD3Agent(
+        embedding_shape=(1, 2, 2),
+        polygon_dim=6,
+        action_dim=4,
+        config=config,
+        device=torch.device("cpu"),
+    )
+
+    embedding = torch.randn(5, *agent.embedding_shape)
+    polygon_state = torch.randn(5, 6)
+
+    assert agent.requires_guided_targets is False
+    action = agent.act(embedding, polygon_state, deterministic=True)
+    assert action.shape == (5, 4)

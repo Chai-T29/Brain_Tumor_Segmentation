@@ -62,7 +62,7 @@ algorithm:
   actor_hidden_sizes: [256, 128]
   critic_hidden_sizes: [256, 128]
   replay_capacity: 300000
-  # guidance_mode options: "critic_guidance", "true_guidance", "mixed", "true_guidance_post_noise", "random_true_guidance"
+  # guidance_mode options: "critic_guidance", "true_guidance", "mixed", "true_guidance_post_noise", "random_true_guidance", "none"
   guidance_mode: "true_guidance"
   mixed_guidance_steps: 2000000  # number of environment interactions before switching to critic-guided actions
   guidance_schedule:
