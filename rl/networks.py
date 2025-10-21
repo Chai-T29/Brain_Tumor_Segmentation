@@ -53,6 +53,12 @@ class EmbeddingEncoder(nn.Module):
             i += 1
 
         self.net = nn.Sequential(*layers)
+        self._flatten_dim = in_channels * max(1, size) * max(1, size)
+        if self._flatten_dim != projected_dim:
+            self.projector = nn.Linear(self._flatten_dim, projected_dim, bias=False)
+            nn.init.kaiming_normal_(self.projector.weight, nonlinearity="relu")
+        else:
+            self.projector = nn.Identity()
         self.norm = nn.LayerNorm(projected_dim, elementwise_affine=False)
 
     def forward(self, embedding_map: torch.Tensor) -> torch.Tensor:
@@ -60,6 +66,7 @@ class EmbeddingEncoder(nn.Module):
             raise ValueError("Expected embedding map with shape [B, C, H, W].")
         projected = self.net(embedding_map)
         flattened = projected.flatten(start_dim=1)
+        flattened = self.projector(flattened)
         return self.norm(flattened)
 
 

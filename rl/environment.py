@@ -6,6 +6,7 @@ from typing import Dict, Tuple
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import matplotlib
 
 matplotlib.use("Agg", force=True)
@@ -31,14 +32,19 @@ class EnvironmentConfig:
     line_min_distance: float = 0.0
     line_max_distance_margin: float = 1.0
     center_step_scale: float = 2.0
+    # Performance knobs:
+    # - iou_downsample: downsample factor for IoU raster grid (>=1). 1 keeps full resolution.
+    # - compute_vertices: if False, skip expensive polygon vertex computation during reset/step.
+    iou_downsample: int = 1
+    compute_vertices: bool = True
 
 
 class PolygonLocalizationEnv:
     """Environment that controls supporting lines which define a convex polytope."""
 
     def __init__(self, config: EnvironmentConfig) -> None:
-        if config.num_sides < 3:
-            raise ValueError("num_sides must be >= 3.")
+        if config.num_sides < 2:
+            raise ValueError("num_sides must be >= 2.")
         self.config = config
         self.num_lines = int(config.num_sides)
         self.line_action_dim = self.num_lines * 2  # distance Δ, angle Δ
@@ -72,6 +78,8 @@ class PolygonLocalizationEnv:
         self._center_offset_min: torch.Tensor | None = None
         self._center_offset_max: torch.Tensor | None = None
         self._max_distance: float = 0.0
+        # Cached downsample factor for IoU computations
+        self._iou_down: int = max(1, int(self.config.iou_downsample))
 
     def reset(self, images: torch.Tensor, masks: torch.Tensor) -> torch.Tensor:
         if images.dim() != 4 or images.size(1) != 1:
@@ -120,7 +128,12 @@ class PolygonLocalizationEnv:
         normals = self._compute_normals()
         poly_masks = self._rasterize_polytope(normals, self.line_distances)
         self.last_iou = self._calculate_iou_from_masks(poly_masks)
-        self.vertices = self._compute_vertices(normals, self.line_distances)
+        # Optionally compute vertices (expensive); useful mainly for rendering/inspection.
+        self.vertices = (
+            self._compute_vertices(normals, self.line_distances)
+            if self.config.compute_vertices
+            else None
+        )
 
         return self._polygon_state()
 
@@ -210,7 +223,10 @@ class PolygonLocalizationEnv:
         self.active_mask = active & ~done
         self.last_iou = torch.where(active, current_iou, self.last_iou)
 
-        self.vertices = self._compute_vertices(normals, self.line_distances)
+        if self.config.compute_vertices:
+            self.vertices = self._compute_vertices(normals, self.line_distances)
+        else:
+            self.vertices = None
         next_state = self._polygon_state()
         info = {
             "iou": current_iou.detach(),
@@ -277,8 +293,10 @@ class PolygonLocalizationEnv:
     def _pixel_coords(self, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
         cached = self._pixel_coord_cache.get(device)
         if cached is None:
-            x_coords = torch.arange(self.width, dtype=torch.float32, device=device).view(1, 1, 1, self.width)
-            y_coords = torch.arange(self.height, dtype=torch.float32, device=device).view(1, 1, self.height, 1)
+            # Build downsampled coordinate grids for IoU rasterization to reduce compute.
+            step = max(1, int(self._iou_down))
+            x_coords = torch.arange(0, self.width, step=step, dtype=torch.float32, device=device).view(1, 1, 1, -1)
+            y_coords = torch.arange(0, self.height, step=step, dtype=torch.float32, device=device).view(1, 1, -1, 1)
             cached = (x_coords, y_coords)
             self._pixel_coord_cache[device] = cached
         return cached
@@ -300,7 +318,11 @@ class PolygonLocalizationEnv:
     def _calculate_iou_from_masks(self, poly_masks: torch.Tensor) -> torch.Tensor:
         if self.masks is None:
             raise RuntimeError("Masks are not available.")
-        gt_masks = (self.masks.squeeze(1) > 0.5).to(poly_masks.device).to(poly_masks.dtype)
+        # Resize GT masks to poly mask resolution if IoU grid is downsampled.
+        gt = self.masks
+        if gt.dim() == 4 and (gt.size(-2) != poly_masks.size(-2) or gt.size(-1) != poly_masks.size(-1)):
+            gt = F.interpolate(gt, size=(poly_masks.size(-2), poly_masks.size(-1)), mode="nearest")
+        gt_masks = (gt.squeeze(1) > 0.5).to(poly_masks.device).to(poly_masks.dtype)
         intersection = (poly_masks * gt_masks).sum(dim=(1, 2))
         union = poly_masks.sum(dim=(1, 2)) + gt_masks.sum(dim=(1, 2)) - intersection
         return torch.where(union > 0, intersection / union, torch.zeros_like(union))

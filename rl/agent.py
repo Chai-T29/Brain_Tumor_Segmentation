@@ -168,7 +168,8 @@ class TD3Agent(nn.Module):
         embedding_map: torch.Tensor,
         polygon_state: torch.Tensor,
         noisy_action: torch.Tensor,
-        sigma: float
+        sigma: float,
+        encoded_q1: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Adjust a noisy action using the critic gradient if it improves value."""
 
@@ -184,9 +185,11 @@ class TD3Agent(nn.Module):
 
         with torch.enable_grad():
             action_var = noisy_action.detach().clone().requires_grad_(True)
-            encoded_q1 = self.critic.encode_q1(embedding_map, apply_noise=False)
-            encoded_q1 = encoded_q1.detach()
-            q1 = self.critic.q1_forward_from_encoded(encoded_q1, poly, action_var)
+            encoded_q1_local = encoded_q1
+            if encoded_q1_local is None:
+                encoded_q1_local = self.critic.encode_q1(embedding_map, apply_noise=False)
+            encoded_q1_local = encoded_q1_local.to(self.device).detach()
+            q1 = self.critic.q1_forward_from_encoded(encoded_q1_local, poly, action_var)
             q_min = q1
             grad = torch.autograd.grad(q_min.sum(), action_var, retain_graph=False, allow_unused=False)[0]
 
@@ -200,7 +203,7 @@ class TD3Agent(nn.Module):
 
         with torch.no_grad():
             q_min_original = q_min.detach()
-            q1_new = self.critic.q1_forward_from_encoded(encoded_q1, poly, candidate_action)
+            q1_new = self.critic.q1_forward_from_encoded(encoded_q1_local, poly, candidate_action)
             q_min_new = q1_new
 
         improved = (q_min_new > q_min_original).view(-1, 1)
@@ -225,6 +228,7 @@ class TD3Agent(nn.Module):
         embedding = embedding.to(self.device)
         polygon_state = polygon_state.to(self.device)
 
+        encoded_q1_cache: torch.Tensor | None = None
         if use_gradient_guidance:
             self.critic.eval()
 
@@ -250,7 +254,90 @@ class TD3Agent(nn.Module):
                 noise = torch.randn_like(action) * sigma
                 noisy_action = action + noise
                 if use_gradient_guidance:
-                    noisy_action = self._guided_exploration_adjust(embedding, polygon_state, noisy_action, sigma)
+                    if encoded_q1_cache is None:
+                        encoded_q1_cache = self.critic.encode_q1(embedding, apply_noise=False)
+                    noisy_action = self._guided_exploration_adjust(
+                        embedding,
+                        polygon_state,
+                        noisy_action,
+                        sigma,
+                        encoded_q1=encoded_q1_cache,
+                    )
+                elif use_true_post and guided_targets is not None and guidance_scale_tensor is not None:
+                    if torch.any(guidance_scale_tensor > 0.0):
+                        tgt = guided_targets.to(action.device).clamp(-1.0, 1.0)
+                        noisy_action = (noisy_action + guidance_scale_tensor * (tgt - noisy_action)).clamp(-1.0, 1.0)
+                action = noisy_action
+            self._interaction_count += embedding.size(0)
+        else:
+            if use_true_post and guided_targets is not None and guidance_scale_tensor is not None:
+                if torch.any(guidance_scale_tensor > 0.0):
+                    tgt = guided_targets.to(action.device).clamp(-1.0, 1.0)
+                    action = (action + guidance_scale_tensor * (tgt - action)).clamp(-1.0, 1.0)
+
+        return action.clamp_(-1.0, 1.0)
+
+    @torch.no_grad()
+    def act_from_encoded(
+        self,
+        encoded_embedding: torch.Tensor,
+        embedding: torch.Tensor,
+        polygon_state: torch.Tensor,
+        deterministic: bool = False,
+        apply_embedding_noise: bool = True,
+        guided_targets: torch.Tensor | None = None,
+        encoded_q1: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Variant of :meth:`act` that reuses a pre-encoded embedding."""
+
+        self.actor.eval()
+        mode = self._resolve_guidance_mode()
+        use_gradient_guidance = mode == "critic_guidance"
+        use_true_pre = mode in {"true_guidance", "random_true_guidance"}
+        use_true_post = mode == "true_guidance_post_noise"
+        use_random_true = mode == "random_true_guidance"
+
+        embedding = embedding.to(self.device)
+        polygon_state = polygon_state.to(self.device)
+
+        if use_gradient_guidance:
+            self.critic.eval()
+
+        encoded = encoded_embedding.to(self.device)
+        encoded = encoded.clone()
+        if apply_embedding_noise and self.actor.embedding_noise_std > 0.0:
+            encoded = encoded + torch.randn_like(encoded) * self.actor.embedding_noise_std
+
+        action = self.actor.forward_from_encoded(encoded, polygon_state)
+
+        guidance_scale_value = self._current_guidance_scale()
+        guidance_scale_tensor: Optional[torch.Tensor] = None
+        if (use_true_pre or use_true_post or use_random_true) and guided_targets is not None:
+            if use_random_true:
+                guidance_scale_tensor = torch.rand(action.size(0), device=action.device, dtype=action.dtype).view(-1, 1)
+            else:
+                guidance_scale_tensor = torch.full(
+                    (action.size(0), 1), guidance_scale_value, device=action.device, dtype=action.dtype
+                )
+
+        if use_true_pre and guided_targets is not None and guidance_scale_tensor is not None:
+            if torch.any(guidance_scale_tensor > 0.0):
+                tgt = guided_targets.to(action.device).clamp(-1.0, 1.0)
+                action = (action + guidance_scale_tensor * (tgt - action)).clamp(-1.0, 1.0)
+
+        if not deterministic:
+            sigma = self._current_exploration_sigma()
+            if sigma > 0:
+                noise = torch.randn_like(action) * sigma
+                noisy_action = action + noise
+                if use_gradient_guidance:
+                    noisy_action = self._guided_exploration_adjust(
+                        embedding,
+                        polygon_state,
+                        noisy_action,
+                        sigma,
+                        encoded_q1=encoded_q1,
+                    )
                 elif use_true_post and guided_targets is not None and guidance_scale_tensor is not None:
                     if torch.any(guidance_scale_tensor > 0.0):
                         tgt = guided_targets.to(action.device).clamp(-1.0, 1.0)

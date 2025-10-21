@@ -70,6 +70,8 @@ class ReplayBuffer:
         self._position = 0
         self._size = 0
         self._max_priority = 1.0
+        # Simple memmap cache to avoid repeated np.load calls in pointer mode
+        self._mm_cache: dict[str, np.ndarray] = {}
 
     def __len__(self) -> int:
         return self._size
@@ -152,7 +154,7 @@ class ReplayBuffer:
                     slice_idx = int(ptr.get("slice_index", 0))
                     if path is None:
                         raise ValueError("Embedding pointer missing 'path'.")
-                    arr = np.load(path, mmap_mode="r")
+                    arr = self._get_memmap(str(path))
                     # Create a writable copy from the memmap slice
                     np_copy = np.array(arr[slice_idx], dtype=np.float32, copy=True)
                     emb = torch.from_numpy(np_copy).to(target_device)
@@ -161,7 +163,7 @@ class ReplayBuffer:
                     if len(ptr) < 2:
                         raise ValueError("Embedding pointer sequence must contain (path, slice_index).")
                     path, slice_idx = ptr[0], int(ptr[1])
-                    arr = np.load(str(path), mmap_mode="r")
+                    arr = self._get_memmap(str(path))
                     np_copy = np.array(arr[slice_idx], dtype=np.float32, copy=True)
                     emb = torch.from_numpy(np_copy).to(target_device)
                     emb_list.append(emb)
@@ -193,3 +195,13 @@ class ReplayBuffer:
         current_max = float(self.priorities[: self._size].max().item())
         if current_max > 0:
             self._max_priority = current_max
+
+    # -----------------------------
+    # Internal helpers
+    # -----------------------------
+    def _get_memmap(self, path: str) -> np.ndarray:
+        arr = self._mm_cache.get(path)
+        if arr is None:
+            arr = np.load(path, mmap_mode="r")
+            self._mm_cache[path] = arr
+        return arr

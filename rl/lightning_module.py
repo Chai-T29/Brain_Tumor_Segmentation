@@ -312,6 +312,36 @@ class TD3Lightning(pl.LightningModule):
                     self.replay.update_priorities(batch_indices, metrics["td_errors"])
                 performed_updates += 1
 
+        actor_encoding_cache: torch.Tensor | None = None
+        critic_q1_cache: torch.Tensor | None = None
+        cache_version = -1
+        cached_guidance_mode: str | None = None
+
+        def _refresh_actor_cache(current_mode: str) -> None:
+            nonlocal actor_encoding_cache, critic_q1_cache, cache_version, cached_guidance_mode
+            with torch.no_grad():
+                actor_encoding_cache = self.agent.actor.encode(embedding_maps, apply_noise=False).detach()
+                cache_version = self.agent.total_updates
+                cached_guidance_mode = current_mode
+                if current_mode == "critic_guidance":
+                    critic_q1_cache = self.agent.critic.encode_q1(embedding_maps, apply_noise=False).detach()
+                else:
+                    critic_q1_cache = None
+
+        def _ensure_caches() -> None:
+            nonlocal actor_encoding_cache, critic_q1_cache, cache_version, cached_guidance_mode
+            current_mode = self.agent._resolve_guidance_mode()
+            if actor_encoding_cache is None or cache_version != self.agent.total_updates:
+                _refresh_actor_cache(current_mode)
+            else:
+                if current_mode != cached_guidance_mode:
+                    cached_guidance_mode = current_mode
+                    if current_mode == "critic_guidance":
+                        with torch.no_grad():
+                            critic_q1_cache = self.agent.critic.encode_q1(embedding_maps, apply_noise=False).detach()
+                    else:
+                        critic_q1_cache = None
+
         for _ in range(max_collect_steps):
             if not alive_mask.any():
                 break
@@ -333,34 +363,49 @@ class TD3Lightning(pl.LightningModule):
                     current_iou=current_iou,
                 )
 
-            guided_subset = None
-            if guidance_targets_full is not None and active_indices.numel() > 0:
-                guided_subset = guidance_targets_full[active_indices]
-
             base_policy_actions = None
+            guided_subset = None
+            active_idx_device: torch.Tensor | None = None
             if active_indices.numel() > 0:
+                active_idx_device = active_indices.to(self.device)
+                if guidance_targets_full is not None:
+                    guided_subset = torch.index_select(guidance_targets_full, 0, active_idx_device)
+
+                _ensure_caches()
+
+                actor_encoded_active = torch.index_select(actor_encoding_cache, 0, active_idx_device)
+                polygon_active = torch.index_select(polygon_state, 0, active_idx_device)
+
                 with torch.no_grad():
-                    base_policy_actions = self.agent.actor.forward(
-                        embedding_maps[active_indices],
-                        polygon_state[active_indices],
-                        apply_noise=False,
+                    base_policy_actions = self.agent.actor.forward_from_encoded(
+                        actor_encoded_active,
+                        polygon_active,
                     )
                     base_action_norm_total += float(base_policy_actions.norm(dim=-1).sum().item())
                     base_action_count += int(base_policy_actions.size(0))
 
-                chosen_actions = self.agent.act(
-                    embedding_maps[active_indices],
-                    polygon_state[active_indices],
+                embedding_active = torch.index_select(embedding_maps, 0, active_idx_device)
+                critic_encoded_active = None
+                if critic_q1_cache is not None:
+                    critic_encoded_active = torch.index_select(critic_q1_cache, 0, active_idx_device)
+
+                chosen_actions = self.agent.act_from_encoded(
+                    actor_encoded_active,
+                    embedding_active,
+                    polygon_active,
                     deterministic=False,
                     apply_embedding_noise=not self.agent.is_true_guidance_active(),
                     guided_targets=guided_subset,
+                    encoded_q1=critic_encoded_active,
                 )
-                actions[active_indices] = chosen_actions
+                actions.index_copy_(0, active_idx_device, chosen_actions)
             actions_cpu = actions.detach().cpu()
 
             # Measure norms only over active envs to avoid bias from zeroed actions
             if active_indices.numel() > 0:
-                active_actions = actions[active_indices]
+                if active_idx_device is None:
+                    active_idx_device = active_indices.to(self.device)
+                active_actions = torch.index_select(actions, 0, active_idx_device)
                 action_norm_total += float(active_actions.norm(dim=-1).sum().item())
                 action_measure_count += int(active_actions.size(0))
                 if self.line_action_dim > 0:
@@ -402,8 +447,13 @@ class TD3Lightning(pl.LightningModule):
             success_device = success.to(self.device)
             iou = info["iou"].to(self.device)
 
-            cumulative_rewards[active_indices] += reward[active_indices]
-            steps_taken[active_indices] += 1.0
+            if active_indices.numel() > 0:
+                if active_idx_device is None:
+                    active_idx_device = active_indices.to(self.device)
+                reward_active = torch.index_select(reward, 0, active_idx_device)
+                cumulative_rewards.index_add_(0, active_idx_device, reward_active)
+                step_increments = torch.ones_like(reward_active)
+                steps_taken.index_add_(0, active_idx_device, step_increments)
 
             newly_done = done_bool & alive_before
             if newly_done.any():
