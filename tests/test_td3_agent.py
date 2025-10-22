@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 
-from rl.agent import TD3Agent, TD3Config, NoiseScheduleConfig
+from rl.agent import TD3Agent, TD3Config, NoiseScheduleConfig, GuidanceScheduleConfig
 from rl.lightning_module import TD3Lightning
 from rl.replay_buffer import ReplayBuffer, Transition
 
@@ -204,3 +204,50 @@ def test_guidance_mode_none_requires_no_targets():
     assert agent.requires_guided_targets is False
     action = agent.act(embedding, polygon_state, deterministic=True)
     assert action.shape == (5, 4)
+
+
+def test_true_guidance_skips_adjustment_when_deterministic():
+    config = TD3Config(
+        guidance_mode="true_guidance",
+        exploration_noise=NoiseScheduleConfig(sigma_init=0.0, sigma_final=0.0, steps=1),
+        embedding_noise_std=0.0,
+        embedding_projected_dim=4,
+        actor_hidden_sizes=(8,),
+        critic_hidden_sizes=(8,),
+        guidance_schedule=GuidanceScheduleConfig(scale_init=1.0, scale_final=1.0, steps=1),
+    )
+    agent = TD3Agent(
+        embedding_shape=(1, 2, 2),
+        polygon_dim=6,
+        action_dim=4,
+        config=config,
+        device=torch.device("cpu"),
+    )
+
+    embedding = torch.randn(3, *agent.embedding_shape)
+    polygon_state = torch.randn(3, 6)
+    guided_targets = torch.randn(3, 4)
+
+    with torch.no_grad():
+        encoded = agent.actor.encode(embedding, apply_noise=False)
+        base_action = agent.actor.forward_from_encoded(encoded, polygon_state)
+
+    deterministic_action = agent.act(
+        embedding,
+        polygon_state,
+        deterministic=True,
+        apply_embedding_noise=False,
+        guided_targets=guided_targets,
+    )
+
+    assert torch.allclose(deterministic_action, base_action, atol=1e-6)
+
+    stochastic_action = agent.act(
+        embedding,
+        polygon_state,
+        deterministic=False,
+        apply_embedding_noise=False,
+        guided_targets=guided_targets,
+    )
+
+    assert not torch.allclose(stochastic_action, base_action, atol=1e-6)

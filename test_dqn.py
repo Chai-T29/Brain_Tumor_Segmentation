@@ -40,9 +40,15 @@ def find_checkpoint(log_dir: Path, logger_name: str, checkpoint_subdir: str) -> 
     if not logger_root.exists():
         return None
 
+    def _version_number(path: Path) -> int:
+        try:
+            return int(path.name.split("_")[-1])
+        except (ValueError, IndexError):
+            return -1
+
     candidate_versions = sorted(
         (path for path in logger_root.glob("version_*") if path.is_dir()),
-        key=lambda x: int(str(x)[-1]),
+        key=_version_number,
         reverse=True,
     )
     for version_dir in candidate_versions:

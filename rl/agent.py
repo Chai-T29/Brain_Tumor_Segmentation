@@ -244,7 +244,12 @@ class TD3Agent(nn.Module):
             else:
                 guidance_scale_tensor = torch.full((action.size(0), 1), guidance_scale_value, device=action.device, dtype=action.dtype)
 
-        if use_true_pre and guided_targets is not None and guidance_scale_tensor is not None:
+        if (
+            not deterministic
+            and use_true_pre
+            and guided_targets is not None
+            and guidance_scale_tensor is not None
+        ):
             if torch.any(guidance_scale_tensor > 0.0):
                 tgt = guided_targets.to(action.device).clamp(-1.0, 1.0)
                 action = (action + guidance_scale_tensor * (tgt - action)).clamp(-1.0, 1.0)
@@ -270,11 +275,6 @@ class TD3Agent(nn.Module):
                         noisy_action = (noisy_action + guidance_scale_tensor * (tgt - noisy_action)).clamp(-1.0, 1.0)
                 action = noisy_action
             self._interaction_count += embedding.size(0)
-        else:
-            if use_true_post and guided_targets is not None and guidance_scale_tensor is not None:
-                if torch.any(guidance_scale_tensor > 0.0):
-                    tgt = guided_targets.to(action.device).clamp(-1.0, 1.0)
-                    action = (action + guidance_scale_tensor * (tgt - action)).clamp(-1.0, 1.0)
 
         return action.clamp_(-1.0, 1.0)
 
@@ -321,7 +321,12 @@ class TD3Agent(nn.Module):
                     (action.size(0), 1), guidance_scale_value, device=action.device, dtype=action.dtype
                 )
 
-        if use_true_pre and guided_targets is not None and guidance_scale_tensor is not None:
+        if (
+            not deterministic
+            and use_true_pre
+            and guided_targets is not None
+            and guidance_scale_tensor is not None
+        ):
             if torch.any(guidance_scale_tensor > 0.0):
                 tgt = guided_targets.to(action.device).clamp(-1.0, 1.0)
                 action = (action + guidance_scale_tensor * (tgt - action)).clamp(-1.0, 1.0)
@@ -345,11 +350,6 @@ class TD3Agent(nn.Module):
                         noisy_action = (noisy_action + guidance_scale_tensor * (tgt - noisy_action)).clamp(-1.0, 1.0)
                 action = noisy_action
             self._interaction_count += embedding.size(0)
-        else:
-            if use_true_post and guided_targets is not None and guidance_scale_tensor is not None:
-                if torch.any(guidance_scale_tensor > 0.0):
-                    tgt = guided_targets.to(action.device).clamp(-1.0, 1.0)
-                    action = (action + guidance_scale_tensor * (tgt - action)).clamp(-1.0, 1.0)
 
         return action.clamp_(-1.0, 1.0)
 

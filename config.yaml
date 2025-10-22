@@ -21,7 +21,7 @@ encoder:
 
 environment:
   num_sides: 32
-  max_steps: 60
+  max_steps: 40
   iou_low_threshold: 0.2
   iou_high_threshold: 0.5
   initial_radius: 90.0
@@ -32,7 +32,7 @@ environment:
   line_min_distance: 0.0
   line_max_distance_margin: 1.0
   iou_downsample: 4
-  compute_vertices: false
+  compute_vertices: true
   reward_success: 4.0
   reward_no_tumor: 2.0
   reward_false_stop: -3.0
@@ -48,7 +48,7 @@ algorithm:
   policy_delay: 2
   exploration_noise:
     sigma_init: 1.0
-    sigma_final: 0.1
+    sigma_final: 0.05
     steps: 500000
   target_policy_noise_std: 0.2
   target_policy_noise_clip: 0.5
@@ -66,11 +66,11 @@ algorithm:
   guidance_mode: "true_guidance"
   mixed_guidance_steps: 2000000  # number of environment interactions before switching to critic-guided actions
   guidance_schedule:
-    scale_init: 0.7
-    scale_final: 0.0
+    scale_init: 1.0
+    scale_final: 0.5
     steps: 2000000
-  guided_actor_loss: false
-  guided_actor_loss_weight: 1.0
+  guided_actor_loss: true
+  guided_actor_loss_weight: 2.0
   use_embedding_pointers: true
   actor_lr_schedule:
     lr_init: 0.001
@@ -86,7 +86,7 @@ training:
   precision: "32-true"
   update_batch_size: 512
   update_every_n_steps: 8
-  collect_steps_per_batch: 50
+  collect_steps_per_batch: 20
   warmup_steps: 1000
   log_interval: 10
 
@@ -96,5 +96,5 @@ logging:
   checkpoint_dir: "checkpoints"
   test_gif_limit: 10
   test_gif_dir: "lightning_logs/test_gifs"
-  test_gif_fps: 4
+  test_gif_fps: 2
   early_stopping_patience: 20

@@ -418,8 +418,13 @@ class PolygonLocalizationEnv:
         return torch.stack(padded_polys, dim=0)
 
     def render(self, index: int = 0, mode: str = "rgb_array"):
-        if self.images is None or self.vertices is None:
+        if self.images is None:
             raise RuntimeError("Environment must be reset before rendering.")
+        if self.vertices is None:
+            if self.line_distances is None or self.line_angle_offsets is None:
+                raise RuntimeError("Environment must be reset before rendering.")
+            normals = self._compute_normals()
+            self.vertices = self._compute_vertices(normals, self.line_distances)
         if not 0 <= index < self.images.size(0):
             raise IndexError("Render index out of range.")
 
