@@ -796,12 +796,6 @@ class TD3Lightning(pl.LightningModule):
         images = batch["image"].to(self.device, non_blocking=True)
         masks = batch["mask"].to(self.device, non_blocking=True)
         embedding_maps = batch["embedding"].to(self.device, non_blocking=True)
-        target_polygon = None
-        target_polygon_batch = batch.get("target_polygon_state")
-        if target_polygon_batch is not None:
-            target_polygon = target_polygon_batch.to(self.device, dtype=torch.float32)
-        elif self.agent.requires_guided_targets:
-            raise RuntimeError("Guided targets required by selected mode but not provided in dataset batch.")
 
         state_cpu = env.reset(images.cpu(), masks.cpu())
         state = state_cpu.to(self.device)
@@ -827,31 +821,11 @@ class TD3Lightning(pl.LightningModule):
             actions = torch.zeros(batch_size, env.action_dim, device=self.device)
             active_indices = active_mask.nonzero(as_tuple=False).squeeze(1)
 
-            guidance_targets_full = None
-            if (
-                target_polygon is not None
-                and active_indices.numel() > 0
-                and (self.agent.requires_guided_targets or self.agent.is_true_guidance_active())
-            ):
-                current_iou = None
-                if env.last_iou is not None:
-                    current_iou = env.last_iou.detach().to(self.device, dtype=state.dtype)
-                guidance_targets_full = self._compute_true_guidance_targets(
-                    state,
-                    target_polygon,
-                    current_iou=current_iou,
-                )
-
-            guided_subset = None
-            if guidance_targets_full is not None and active_indices.numel() > 0:
-                guided_subset = guidance_targets_full[active_indices]
-
             selected_actions = self.agent.act(
                 embedding_maps[active_indices],
                 state[active_indices],
                 deterministic=deterministic,
-                apply_embedding_noise=False,
-                guided_targets=guided_subset,
+                apply_embedding_noise=False
             )
             actions[active_indices] = selected_actions
 

@@ -236,6 +236,9 @@ class TD3Agent(nn.Module):
         encoded = self.actor.encode(embedding, apply_noise=apply_embedding_noise)
         action = self.actor.forward_from_encoded(encoded, polygon_state)
 
+        if deterministic:
+            return action.clamp_(-1.0, 1.0)
+
         guidance_scale_value = self._current_guidance_scale()
         guidance_scale_tensor: Optional[torch.Tensor] = None
         if (use_true_pre or use_true_post or use_random_true) and guided_targets is not None:
